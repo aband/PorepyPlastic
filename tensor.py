@@ -310,7 +310,7 @@ class symmetricSecondOrderTensor(Tensor):
 
         self.mandel_vec = np.array([self._data[0,0],
                                     self._data[1,1],
-                                    self._data[1,1],
+                                    self._data[2,2],
                                     np.sqrt(2.0)*self._data[1,2],
                                     np.sqrt(2.0)*self._data[0,2],
                                     np.sqrt(2.0)*self._data[0,1],
