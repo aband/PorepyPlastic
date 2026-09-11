@@ -171,7 +171,42 @@ class vonMisesModel(abstractMaterialEvaluate):
         s_trial: stress = sigma_trial.deviatoric()
         xi_trial: stress = s_trial - backstress_n.deviatoric()
 
+        xi_trial_norm = np.sqrt(xi_trial.inner(xi_trial))
 
+        dgamma = self.consistency_parameter(
+            xi_trial_norm=xi_trial_norm,
+            alpha_n=alpha_n,
+            mu=mu,
+            parameters=parameters,
+            K_law=K_law,
+            H_law=H_law,
+            tolerance=tol,
+        )
+
+        if dgamma == 0.0:
+            return (
+                sigma_trial,
+                plastic_strain_n,
+                backstress_n,
+                alpha_n,
+                dgamma,
+            )
+
+        direction = xi_trial / xi_trial_norm
+        c = np.sqrt(2.0 / 3.0)
+        alpha = alpha_n + c * dgamma
+
+        H_n, _ = H_law(alpha_n, parameters)
+        H, _ = H_law(alpha, parameters)
+
+        sigma = sigma_trial - (2.0 * mu * dgamma) * direction
+        plastic_strain = (
+            plastic_strain_n
+            + dgamma * strain(direction.to_numpy(copy=False))
+        )
+        backstress = backstress_n + c * (H - H_n) * direction
+
+        return sigma, plastic_strain, backstress, alpha, dgamma
 
 # Save for later
 #class mohrCoulombEvaluate(abstractMaterialEvaluate):
