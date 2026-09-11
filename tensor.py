@@ -1,6 +1,12 @@
 """
 This file contains a wrapper aroung np.ndarray representing 
 symmetricSecondOrderTensor and strain.
+
+This tensor wrapper is used for
+1. Material point evaluation.
+2. Post-processing
+
+Data convertion mainly use mandel representation.
 """
 
 from __future__ import annotations
@@ -220,6 +226,18 @@ class Tensor(ABC):
                 copy=False
             )
 
+    def to_numpy(
+        self,
+        *,
+        copy: bool = True,
+    ) -> np.ndarray:
+        if copy:
+            return self._data.copy()
+
+        view = self._data.view()
+        view.flags.writeable = False
+        return view
+
     @property
     def print_as_matrix(self) ->None:
         #project the target tensor into matrix form
@@ -242,11 +260,11 @@ class symmetricSecondOrderTensor(Tensor):
             raise ValueError("Not a symmetricSecondOrderTensor tensor. Not identical dimensions.")
 
         # Get dimension (Useful when storing all symmetricSecondOrderTensor tensor for all cells)
-        self.dimension = self._data.shape[0]
+        #self.dimension = self._data.shape[0]
         # Hydrostatic symmetricSecondOrderTensor
-        self.hydrostatic_symmetricSecondOrderTensor = 1.0/3.0 * self._data.trace()
+        #self.hydrostatic = 1.0/3.0 * self._data.trace()
         # Deviatoric symmetricSecondOrderTensor
-        self.deviatoric_symmetricSecondOrderTensor = self._data - self.hydrostatic_symmetricSecondOrderTensor*np.eye(self.dimension)
+        #self.deviatoric = self._data - self.hydrostatic*np.eye(self.dimension)
 
     @classmethod
     def from_mandel(
@@ -298,8 +316,50 @@ class symmetricSecondOrderTensor(Tensor):
                                     np.sqrt(2.0)*self._data[0,1],
                                     ],dtype=np.float64)
 
+    @property
+    def dimension(self)->int:
+        return self._data.shape[0] 
+
+    @property
+    def trace(self)->float:
+        return float(np.trace(self._data))
+
+    @property
+    def mean(self)->float:
+        return self.trace/self.dimension
+
+    def spherical(self)->Self:
+        spherical_data = (
+            self.mean *
+            np.eye(
+                self.dimension,
+                dtype=np.float64
+                )
+        )
+        return type(self)(
+            spherical_data,
+            copy=False,
+        )
+
+    def deviatoric(self)->Self:
+        """
+        Return the deviatoric part of the target tensor.
+        """
+        deviatoric_data = (
+            self._data
+            - self.spherical().to_numpy(copy=False)
+        )
+
+        return type(self)(
+            deviatoric_data,
+            copy=False,
+        )
+
 class strain(symmetricSecondOrderTensor):
     __slots__ = ()
 
 class stress(symmetricSecondOrderTensor):
     __slots__ = ()
+
+    def hydrostatic(self) -> Self:
+        return self.spherical()
