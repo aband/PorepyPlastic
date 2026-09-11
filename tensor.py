@@ -82,21 +82,21 @@ class Tensor(ABC):
                 f"{self.shape} != {other.shape}."
             )
 
-    def __add__(self, other:Tensor) -> Tensor:
+    def __add__(self, other:Tensor) -> Self:
         self._same_shape(other)
         return type(self)(
             self._data + other._data,
             copy=False
         )
 
-    def __sub__(self, other:Tensor) -> Tensor:
+    def __sub__(self, other:Tensor) -> Self:
         self._same_shape(other)
         return type(self)(
             self._data - other._data,
             copy=False
         )
 
-    def __neg__(self) -> Tensor:
+    def __neg__(self) -> Self:
         return type(self)(
             -self._data,
             copy=False,
@@ -105,7 +105,7 @@ class Tensor(ABC):
     def __mul__(
         self,
         scalar: object,
-    ) -> Tensor:
+    ) -> Self:
         if not isinstance(
             scalar,
             (Real, np.integer, np.floating),
@@ -120,7 +120,7 @@ class Tensor(ABC):
     def __rmul__(
         self,
         scalar: object,
-    ) -> Tensor:
+    ) -> Self:
         return self.__mul__(scalar)
 
     def __truediv__(
@@ -148,7 +148,7 @@ class Tensor(ABC):
     def __matmul__(
         self,
         other: Tensor,
-    ) -> Tensor:
+    ) -> Self:
         return type(self)(
             np.matmul(self._data, other._data),
             copy=False,
@@ -157,7 +157,7 @@ class Tensor(ABC):
     def hadamard(
         self,
         other: Tensor,
-    ) -> Tensor:
+    ) -> Self:
         """Componentwise multiplication."""
         self._same_shape(other)
 
