@@ -221,7 +221,6 @@ def test_from_mandel_rejects_invalid_shape():
     with pytest.raises(ValueError, match=r"shape \(6,\)"):
         stress.from_mandel(np.zeros(3))
 
-
 #@pytest.mark.xfail(
 #    reason="create_mandel_representation currently repeats the yy entry for zz",
 #    strict=False,
