@@ -4,10 +4,16 @@ Place this file in the PorepyPlastic repository root and run
 
     python visualize_newton_stress.py
 
-The script leaves the constitutive implementation unchanged. It records the
-same scalar Newton equation used by ``vonMisesModel.consistency_parameter``,
-reconstructs the corresponding stress point at every iterate, verifies the
-final state, and writes an MP4 animation.
+The script solves the same scalar Newton equation as
+``vonMisesModel.consistency_parameter`` and reconstructs the stress at each
+iterate. All five final outputs are checked against ``radial_return_map``.
+The plastic-strain comparison uses zero initial plastic strain and therefore
+checks the plastic-strain increment. No repository source is modified.
+
+The default animation holds each recorded Newton iterate without interpolated
+states. Elastic and hydrostatic trials are supported. The example uses MPa.
+Requires NumPy, Matplotlib, FFmpeg, and the repository's J2, tensor, and
+scalar_hardening modules beside this file.
 """
 
 from __future__ import annotations
@@ -21,7 +27,8 @@ from matplotlib.animation import FFMpegWriter, FuncAnimation
 from matplotlib.patches import Circle
 import numpy as np
 
-from J2 import vonMisesModel
+from J2 import vonMisesModel, _materialProperty
+from tensor import stress, strain
 from scalar_hardening import (
     HardeningParameters,
     ScalarHardeningLaw,
@@ -72,7 +79,13 @@ def compute_newton_history(
     beta_n = deviatoric(backstress_n)
     xi_trial = s_trial - beta_n
     xi_trial_norm = frobenius_norm(xi_trial)
-    direction = xi_trial / xi_trial_norm
+    # At zero shifted stress there is no radial direction. Choose a plotting
+    # axis; the elastic multiplier is zero, so it causes no stress correction.
+    direction = (
+        xi_trial / xi_trial_norm
+        if xi_trial_norm > 0.0
+        else np.diag([1.0, -1.0, 0.0]) / np.sqrt(2.0)
+    )
 
     K_n, _ = K_law(alpha_n, parameters)
     H_n, _ = H_law(alpha_n, parameters)
@@ -113,6 +126,11 @@ def compute_newton_history(
         if trial_residual <= 0.0 or abs(residual) <= tolerance:
             break
 
+        if iteration == max_iterations:
+            raise RuntimeError(
+                f"Local Newton iteration did not converge: R={residual:.3e}"
+            )
+
         derivative = (
             -2.0 * mu
             - (2.0 / 3.0) * (K_prime + H_prime)
@@ -121,18 +139,34 @@ def compute_newton_history(
     else:
         raise RuntimeError("Local Newton iteration did not converge.")
 
-    model_dgamma = vonMisesModel("J2").consistency_parameter(
-        xi_trial_norm=xi_trial_norm,
+    material = _materialProperty()
+    material.young_modulus = young_modulus
+    material.poisson_ratio = poisson_ratio
+
+    sigma, eps_p, beta, alpha, dgamma = vonMisesModel("J2").radial_return_map(
+        sigma_trial=stress(sigma_trial),
+        plastic_strain_n=strain.zeros((3, 3)),
+        backstress_n=stress(backstress_n),
         alpha_n=alpha_n,
-        mu=mu,
-        parameters=parameters,
+        material=material,
         K_law=K_law,
         H_law=H_law,
-        tolerance=tolerance,
-        max_iteration=max_iterations,
+        parameters=parameters,
+        tol=tolerance,
     )
-    if not np.isclose(history[-1].dgamma, model_dgamma, atol=tolerance, rtol=0.0):
-        raise AssertionError("Recorded Newton solution differs from the J2 model.")
+
+    final = history[-1]
+    for name, actual, expected in (
+        ("stress", sigma.to_numpy(), final.stress),
+        ("plastic strain increment", eps_p.to_numpy(), final.dgamma * direction),
+        ("backstress", beta.to_numpy(), final.backstress),
+        ("alpha", alpha, final.alpha),
+        ("plastic multiplier", dgamma, final.dgamma),
+    ):
+        np.testing.assert_allclose(
+            actual, expected, rtol=0.0, atol=tolerance, equal_nan=False,
+            err_msg=f"Animated {name} differs from radial_return_map.",
+        )
 
     return history, direction, mu
 
@@ -148,10 +182,15 @@ def verify_history(
     final = history[-1]
     scale = max(final.yield_radius, 1.0)
 
-    if abs(final.residual) > tolerance:
-        raise AssertionError("The consistency residual did not converge.")
-    if abs(frobenius_norm(final.shifted_stress) - final.yield_radius) > tolerance:
-        raise AssertionError("The final stress point is not on the yield surface.")
+    yield_value = frobenius_norm(final.shifted_stress) - final.yield_radius
+    if not np.isfinite([final.residual, yield_value]).all():
+        raise AssertionError("The final state contains non-finite values.")
+
+    if final.dgamma == 0.0:
+        if final.residual > tolerance or yield_value > tolerance:
+            raise AssertionError("The elastic state is outside the yield surface.")
+    elif abs(final.residual) > tolerance or abs(yield_value) > tolerance:
+        raise AssertionError("The plastic return did not converge.")
 
     for state in history:
         expected = sigma_trial - 2.0 * mu * state.dgamma * direction
@@ -200,6 +239,7 @@ def interpolate_state(
     right: NewtonState,
     fraction: float,
 ) -> dict[str, float | np.ndarray]:
+    """Illustrative interpolation only; disabled in the default animation."""
     one_minus = 1.0 - fraction
     return {
         "iteration": left.iteration + fraction,
@@ -215,8 +255,8 @@ def interpolate_state(
 
 def animation_frames(
     number_of_states: int,
-    transition_frames: int = 22,
-    hold_frames: int = 10,
+    transition_frames: int = 0,
+    hold_frames: int = 20,
 ) -> list[tuple[int, float]]:
     frames: list[tuple[int, float]] = [(0, 0.0)] * (2 * hold_frames)
     for index in range(number_of_states - 1):
@@ -234,6 +274,7 @@ def save_animation(
     direction: np.ndarray,
     output: Path,
     preview: Path | None = None,
+    tolerance: float = 1.0e-10,
 ) -> None:
     """Write the Newton stress-point animation."""
     radial, transverse = projection_basis(direction)
@@ -245,8 +286,11 @@ def save_animation(
     )
     xi_norms = np.array([frobenius_norm(state.shifted_stress) for state in history])
     radii = np.array([state.yield_radius for state in history])
+    elastic = history[-1].dgamma == 0.0
+    raw_residuals = np.array([state.residual for state in history])
+    # An elastic state is admissible when f <= 0; it need not satisfy f = 0.
     residuals = np.maximum(
-        np.abs([state.residual for state in history]),
+        np.maximum(raw_residuals, 0.0) if elastic else np.abs(raw_residuals),
         1.0e-14,
     )
     iterations = np.arange(len(history))
@@ -318,7 +362,7 @@ def save_animation(
             color="#009E73",
             linestyle="--",
             linewidth=1.8,
-            label="Converged yield surface",
+            label="Final yield surface",
         )
         active_circle = Circle(
             current_beta,
@@ -423,6 +467,7 @@ def save_animation(
             label=r"$\sqrt{2/3}\,K(\alpha_k)$",
         )
         radius_axis.set_xlim(-0.15, max(len(history) - 0.85, 1.0))
+        radius_axis.set_xticks(iterations)
         radius_axis.set_ylim(
             0.9 * min(radii.min(), xi_norms.min()),
             1.08 * max(radii.max(), xi_norms.max()),
@@ -454,26 +499,42 @@ def save_animation(
             color="#D55E00",
         )
         residual_axis.axhline(
-            1.0e-10,
+            tolerance,
             color="#009E73",
             linestyle="--",
             linewidth=1.5,
             label="Tolerance",
         )
         residual_axis.set_xlim(-0.15, max(len(history) - 0.85, 1.0))
-        residual_axis.set_ylim(1.0e-14, 10.0 * residuals.max())
-        residual_axis.set_title("Consistency residual")
+        residual_axis.set_xticks(iterations)
+        residual_axis.set_ylim(
+            1.0e-14, max(10.0 * tolerance, 10.0 * residuals.max())
+        )
+        residual_axis.set_title(
+            "Elastic yield violation" if elastic else "Consistency residual"
+        )
         residual_axis.set_xlabel("Newton iteration")
-        residual_axis.set_ylabel(r"$|R_k|$ (MPa)")
+        residual_axis.set_ylabel(
+            r"$\max(f, 0)$ (MPa)" if elastic else r"$|R_k|$ (MPa)"
+        )
         residual_axis.legend(fontsize=9)
 
         converged = index == len(history) - 1 and fraction == 0.0
-        status = "Converged" if converged else "Newton update"
+        status = (
+            "Elastic step"
+            if elastic
+            else ("Converged" if converged else "Newton update")
+        )
+        residual_text = (
+            f"f = {float(current['residual']):.3e} MPa"
+            if elastic
+            else f"|R| = {abs(float(current['residual'])):.3e} MPa"
+        )
         figure.suptitle(
             f"J2 radial return — {status}\n"
             f"iteration = {current_iteration:.2f},  "
             f"Δγ = {float(current['dgamma']):.7f},  "
-            f"|R| = {abs(float(current['residual'])):.3e} MPa",
+            f"{residual_text}",
             fontsize=15,
         )
 
@@ -490,7 +551,9 @@ def save_animation(
     output.parent.mkdir(parents=True, exist_ok=True)
     animation.save(
         output,
-        writer=FFMpegWriter(fps=20, bitrate=2_800),
+        writer=FFMpegWriter(
+            fps=20, bitrate=2_800, codec="libx264", extra_args=["-pix_fmt", "yuv420p"]
+        ),
         dpi=100,
     )
 
@@ -521,6 +584,8 @@ def main() -> None:
         theta=0.4,
         delta=250.0,
     )
+    # For an elastic example use np.diag([100.0, 0.0, 0.0]);
+    # for a hydrostatic example use 900.0 * np.eye(3).
     sigma_trial = np.diag([900.0, 0.0, 0.0])
     backstress_n = np.zeros((3, 3))
     tolerance = 1.0e-10
@@ -541,8 +606,9 @@ def main() -> None:
         mu=mu,
         tolerance=tolerance,
     )
-    save_animation(history, direction, args.output, args.preview)
+    save_animation(history, direction, args.output, args.preview, tolerance)
 
+    print("Return-map verification: passed (all five outputs)")
     print(f"Newton states: {len(history)}")
     print(f"Final residual: {history[-1].residual:.3e} MPa")
     print(f"Video: {args.output.resolve()}")

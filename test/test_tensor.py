@@ -1,3 +1,13 @@
+"""Tensor regression tests.
+
+Run from the repository root:
+    python -m pytest test/test_tensor.py -q
+
+These tests expect matrix multiplication, outer products, and double
+contractions to return a general Tensor. Addition, subtraction, scalar
+arithmetic, and symmetric componentwise products preserve the concrete type.
+"""
+
 from typing import Self, get_type_hints
 
 import numpy as np
@@ -81,13 +91,25 @@ def test_arithmetic_preserves_concrete_type_and_values(tensor_type):
         (left * 2.0, left_data * 2.0),
         (2.0 * left, left_data * 2.0),
         (left / 2.0, left_data / 2.0),
-        (left @ right, left_data @ right_data),
         (left.hadamard(right), left_data * right_data),
     ]
 
     for result, expected in results:
         assert type(result) is tensor_type
         np.testing.assert_allclose(result.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("tensor_type", [Tensor, stress, strain])
+def test_matrix_product_returns_general_tensor(tensor_type):
+    # Symmetric matrices need not have a symmetric matrix product.
+    left = tensor_type([[2.0, 1.0], [1.0, 4.0]])
+    right = tensor_type([[3.0, 0.0], [0.0, 1.0]])
+
+    result = left @ right
+
+    assert type(result) is Tensor
+    np.testing.assert_allclose(result.to_numpy(), [[6.0, 1.0], [3.0, 4.0]])
+    assert not result.is_symmetric
 
 
 def test_stress_subtraction_returns_new_stress():
@@ -158,6 +180,23 @@ def test_outer_product_for_general_tensors():
     np.testing.assert_allclose(result.to_numpy(), np.tensordot(left_data, right_data, axes=0))
 
 
+@pytest.mark.parametrize("tensor_type", [stress, strain])
+def test_outer_product_of_second_order_tensors_returns_rank_four(tensor_type):
+    left_data = np.array([[2.0, 1.0], [1.0, 4.0]])
+    right_data = np.array([[3.0, 0.0], [0.0, 1.0]])
+    left = tensor_type(left_data)
+    right = tensor_type(right_data)
+
+    result = left.outer(right)
+
+    assert type(result) is Tensor
+    assert result.rank == 4
+    assert result.shape == (2, 2, 2, 2)
+    np.testing.assert_allclose(
+        result.to_numpy(), np.einsum("ij,kl->ijkl", left_data, right_data)
+    )
+
+
 def test_double_contraction():
     fourth_order_data = np.arange(16.0).reshape(2, 2, 2, 2)
     second_order_data = np.array([[1.0, 2.0], [3.0, 4.0]])
@@ -173,6 +212,20 @@ def test_double_contraction():
 
     assert type(result) is Tensor
     np.testing.assert_allclose(result.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("tensor_type", [stress, strain])
+def test_double_contraction_of_second_order_tensors_returns_rank_zero(tensor_type):
+    left = tensor_type([[2.0, 1.0], [1.0, 4.0]])
+    right = tensor_type([[3.0, 2.0], [2.0, 1.0]])
+
+    result = left.double_contract(right)
+
+    assert type(result) is Tensor
+    assert result.rank == 0
+    assert result.shape == ()
+    # Full contraction includes both off-diagonal entries: 6 + 2 + 2 + 4.
+    assert result.to_numpy().item() == pytest.approx(14.0)
 
 
 def test_double_contraction_requires_rank_two_or_greater():
@@ -221,10 +274,7 @@ def test_from_mandel_rejects_invalid_shape():
     with pytest.raises(ValueError, match=r"shape \(6,\)"):
         stress.from_mandel(np.zeros(3))
 
-#@pytest.mark.xfail(
-#    reason="create_mandel_representation currently repeats the yy entry for zz",
-#    strict=False,
-#)
+
 def test_mandel_round_trip():
     vector = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     value = stress.from_mandel(vector)

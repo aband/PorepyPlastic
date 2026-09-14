@@ -148,8 +148,8 @@ class Tensor(ABC):
     def __matmul__(
         self,
         other: Tensor,
-    ) -> Self:
-        return type(self)(
+    ) -> Tensor:
+        return Tensor(
             np.matmul(self._data, other._data),
             copy=False,
             )
@@ -186,7 +186,7 @@ class Tensor(ABC):
         other: Tensor,
     ) -> Tensor:
         """Tensor product with no contracted indices."""
-        return type(self)(
+        return Tensor(
             np.tensordot(
                 self._data,
                 other._data,

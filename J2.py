@@ -146,6 +146,23 @@ class vonMisesModel(abstractMaterialEvaluate):
                 dgamma - residual / derivative,
             )
 
+        # Check the result of the final Newton update
+        # For the case when iteration reaches the limit, but not yet converged
+        alpha = alpha_n + c*dgamma
+        K, _ = K_law(alpha, parameters)
+        H, _ = H_law(alpha, parameters)
+
+        residual = (
+            xi_trial_norm
+            - 2.0 * mu * dgamma
+            - c * (K + H - H_n)
+            )
+
+        if not np.isfinite(residual) or abs(residual) > tolerance:
+            raise RuntimeError(
+                f"Local Newton iteration did not converge: R={residual:.3e}"
+            )
+
         return dgamma
 
     def radial_return_map(
