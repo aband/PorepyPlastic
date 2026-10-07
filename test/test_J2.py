@@ -131,3 +131,89 @@ def test_radial_return_map_plastic_step(model, parameters):
     )
 
     assert residual == pytest.approx(0.0, abs=1.0e-10)
+
+
+@pytest.mark.parametrize("max_iteration", [0, 20])
+@pytest.mark.parametrize(
+    "atol, rtol", [(1.0, 0.0), (0.0, 0.01), (0.25, 0.002)]
+)
+def test_absolute_and_relative_residual_convergence(model, parameters, atol, rtol, max_iteration):
+    # For the combined case, neither tolerance alone accepts residual 0.5.
+    trial_norm = sqrt(2.0 / 3.0) * parameters.sigma_y + 0.5
+    dgamma = model.consistency_parameter(
+        xi_trial_norm=trial_norm,
+        alpha_n=0.0,
+        mu=80_000.0,
+        parameters=parameters,
+        K_law=isotropic_hardening_K,
+        H_law=kinematic_hardening_H,
+        tolerance=atol,
+        relative_tolerance=rtol,
+        max_iteration=max_iteration,
+    )
+    assert dgamma == 0.0
+
+
+def test_convergence_after_last_newton_update(model, parameters):
+    trial_norm = 300.0
+    mu = 80_000.0
+    expected = (trial_norm - sqrt(2.0 / 3.0) * parameters.sigma_y) / (
+        2.0 * mu + (2.0 / 3.0) * parameters.H_bar
+    )
+    dgamma = model.consistency_parameter(
+        xi_trial_norm=trial_norm,
+        alpha_n=0.0,
+        mu=mu,
+        parameters=parameters,
+        K_law=isotropic_hardening_K,
+        H_law=kinematic_hardening_H,
+        max_iteration=1,
+    )
+    assert dgamma == pytest.approx(expected, rel=1e-12)
+
+
+def test_unconverged_nonlinear_update_still_raises(model, parameters):
+    parameters.sigma_u = 400.0
+    parameters.delta = 20.0
+    with pytest.raises(RuntimeError, match="did not converge"):
+        model.consistency_parameter(
+            xi_trial_norm=1000.0,
+            alpha_n=0.0,
+            mu=80_000.0,
+            parameters=parameters,
+            K_law=isotropic_hardening_K,
+            H_law=kinematic_hardening_H,
+            max_iteration=1,
+        )
+
+
+@pytest.mark.parametrize("invalid", [-1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("name", ["tolerance", "relative_tolerance"])
+def test_invalid_convergence_tolerances(model, parameters, name, invalid):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        model.consistency_parameter(
+            xi_trial_norm=300.0,
+            alpha_n=0.0,
+            mu=80_000.0,
+            parameters=parameters,
+            K_law=isotropic_hardening_K,
+            H_law=kinematic_hardening_H,
+            **{name: invalid},
+        )
+
+
+def test_nonfinite_residual_is_not_accepted_by_relative_tolerance(model, parameters):
+    import numpy as np
+
+    parameters.delta = 1.0
+    with np.errstate(invalid="ignore"):
+        with pytest.raises(RuntimeError, match="did not converge"):
+            model.consistency_parameter(
+                xi_trial_norm=float("inf"),
+                alpha_n=0.0,
+                mu=80_000.0,
+                parameters=parameters,
+                K_law=isotropic_hardening_K,
+                H_law=kinematic_hardening_H,
+                max_iteration=1,
+            )

@@ -214,7 +214,7 @@ class Tensor(ABC):
                 f"{self.shape[-2:]} != {other.shape[:2]}."
             )
 
-        return type(self)(
+        return Tensor(
             np.tensordot(
                 self._data,
                 other._data,
