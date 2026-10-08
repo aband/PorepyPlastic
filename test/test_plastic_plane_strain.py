@@ -82,12 +82,13 @@ def test_cli_with_alternate_grid_and_schedule(capsys: pytest.CaptureFixture[str]
     assert "alpha_max" in output
     assert "ratio_u" in output and "order_u" in output
     assert output.count("iter       ||R_u||") == 11  # A separate history for every load step.
-    assert "Maximum absolute discrete L2 errors" in output
-    assert "stress:" in output and "[Pa m]" in output
+    assert "Maximum absolute discrete L2 errors" not in output
+    assert "[Pa m]" not in output
     assert "Numerical checks: PASS" in output
-    assert (tmp_path / "pvd" / "plastic_plane_strain.pvd").is_file()
-    assert (tmp_path / "plastic_plane_strain_stress_strain.png").is_file()
-    assert (tmp_path / "plastic_plane_strain_alpha.png").is_file()
+    assert (tmp_path / "pvd" / "plastic_plane_strain_analytical.pvd").is_file()
+    assert (tmp_path / "plastic_plane_strain_analytical_stress_strain.png").is_file()
+    assert (tmp_path / "plastic_plane_strain_analytical_alpha.png").is_file()
+    assert (tmp_path / "plastic_plane_strain_analytical_jacobian.png").is_file()
     assert sum(line.split()[1:2] == ["loading"] for line in output.splitlines()) == 8
     assert sum(line.split()[1:2] == ["unloading"] for line in output.splitlines()) == 3
 
@@ -199,7 +200,8 @@ def test_cli_no_export_overrides_output_directory(tmp_path: Path) -> None:
 
 def test_runner_returns_generated_paths(tmp_path: Path) -> None:
     result = run_example(cells_per_axis=1, loading_steps=8, output_dir=tmp_path)
-    assert set(result.outputs) == {"pvd", "stress_strain", "alpha"}
+    assert set(result.outputs) == {"pvd", "stress_strain", "alpha", "jacobian"}
     for name, path in result.outputs.items():
         assert path.parent == (tmp_path / "pvd" if name == "pvd" else tmp_path)
+        assert path.name.startswith("plastic_plane_strain_analytical")
         assert path.is_file()

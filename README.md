@@ -133,7 +133,9 @@ rotation stress, and one TPSA total pressure per cell. Affine displacement
 This is constrained extension, so transverse stresses need not vanish. The
 example compares the numerical fields, reconstructed Green–Gauss strain, and
 integrated face tractions against
-the exact homogeneous elastic solution. Reported errors are **absolute discrete
+the exact homogeneous elastic solution. The L2 error report is hidden by default;
+use `python -m coupling.plane_strain --show-l2-errors` to print it.
+Reported errors are **absolute discrete
 L2 norms**, computed with PorePy's `ConvergenceAnalysis.lp_error(p=2,
 relative=False)`. Cell fields use cell-area weights,
 `sqrt(sum_K(area_K * ||numerical_K - exact_K||^2))`; integrated face forces use
@@ -603,6 +605,11 @@ loading and elastic unloading, fresh Jacobians, restart, snapshot ownership,
 and preservation of accepted history after Newton, linear-solve, factory, or
 material failures.
 
+A one-page description of its default boundary conditions, material, load path
+and solver settings is available as [PDF](docs/plastic_plane_strain_case.pdf)
+and [LaTeX source](docs/plastic_plane_strain_case.tex). Regenerate the supplied
+PDF with `python docs/generate_plastic_plane_strain_case.py` (Matplotlib).
+
 The runnable plastic benchmark is `coupling/plastic_plane_strain.py`:
 
 ```bash
@@ -635,10 +642,14 @@ block, with a resolvable logarithmic denominator. Rate histories restart at ever
 load step, and neither solver tolerances nor convergence decisions are changed.
 These are empirical residual rates; a short history, a yield switch, or numerical
 noise can prevent a reliable asymptotic-order estimate. The Python runner remains
-quiet unless `verbose=True`.
+quiet unless `verbose=True` or `show_l2_errors=True`.
 
-A final table reports the largest
-**absolute discrete L2 field errors** over all accepted steps. These field errors
+The L2 error summary is hidden by default, including when `verbose=True`.
+Use `python -m coupling.plastic_plane_strain --show-l2-errors` (optionally with
+`--no-export`) or `run_example(show_l2_errors=True)` to print the largest
+**absolute discrete L2 field errors** over all accepted steps.
+This option controls printing only: numerical checks always run, and errors
+remain available in `result.checks`. These field errors
 use cell-volume or PorePy face-dual-volume weights, separately from Newton's
 unweighted residual norms. Tensor errors include all nine 3D components, retaining
 out-of-plane stress and plastic strain under the plane-strain constraint.
@@ -672,26 +683,38 @@ yields near factor 0.4 and reaches peak alpha approximately `1.628e-3`; the two
 unloading steps retain that plastic history. After all numerical checks pass,
 the command exports accepted states with `pp.Exporter` to `results/`:
 
-- `pvd/plastic_plane_strain.pvd`: the complete loading/unloading collection. Open this
+- `pvd/plastic_plane_strain_analytical.pvd`: the complete loading/unloading collection. Open this
   file in ParaView to browse all accepted steps.
-- `vtu/plastic_plane_strain_2_000001.vtu`, etc.: one file per accepted step, on the
+- `vtu/plastic_plane_strain_analytical_2_000001.vtu`, etc.: one file per accepted step, on the
   undeformed mesh.
-- `plastic_plane_strain_stress_strain.png`: volume-mean Cauchy stress
+- `plastic_plane_strain_analytical_stress_strain.png`: volume-mean Cauchy stress
   `sigma_xx` (MPa) against volume-mean total strain `epsilon_xx`. The curve follows
   accepted-step order, with decreasing load-factor segments marked in red.
-- `plastic_plane_strain_alpha.png`: volume-mean accumulated equivalent plastic
+- `plastic_plane_strain_analytical_alpha.png`: volume-mean accumulated equivalent plastic
   strain against accepted step number.
+- `plastic_plane_strain_analytical_jacobian.png`: the full coupled Jacobian evaluated at the
+  converged peak loading state (step 20, factor 1 by default), using the selected
+  analytical or finite-difference Jacobian and the preceding committed history.
+  Rows are residual blocks `[R_u, R_r, R_p]`; columns are unknowns `[u, r, p]`.
+  Dashed lines separate blocks. Blue/red show negative/positive entries; zero is
+  white. A symmetric logarithmic color scale shows the raw entries with their
+  different block units, with a linear interval within `+/-1e-12`.
+
+All plastic-run output filenames include the selected Jacobian type:
+`plastic_plane_strain_analytical_*` or `plastic_plane_strain_finite-difference_*`.
+This applies to PNGs, VTUs, and both the main and individual-step PVD collections,
+so runs using different Jacobians can share an output directory.
 
 All VTU files are grouped under `results/vtu/`. PVD collections (including
 individual-step PVDs) are grouped under `results/pvd/` and reference VTUs through
 `../vtu/`. PNG plots stay directly under `results/`. Custom output directories
-use the same layout. Open `results/pvd/plastic_plane_strain.pvd` in ParaView for
+use the same layout. Open `results/pvd/plastic_plane_strain_analytical.pvd` in ParaView for
 the complete plastic history.
 
 PVD time values are **sequence indices 1, 2, ...**, not physical times or load
 factors. Each VTU stores `load_step` and `load_factor` separately, so unloading
 retains its chronological order. Only accepted states are exported; no initial
-zero state is added. Both PNGs use cell-volume averages, which equal the local
+zero state is added. The two history PNGs use cell-volume averages, which equal the local
 values for this homogeneous example. A gold diamond labeled **Yield detected**
 marks the first recorded state with positive alpha in any cell, showing its step
 number and load factor (step 8, factor 0.4 for the default run). This marks the
@@ -709,7 +732,8 @@ In particular, plane strain retains nonzero `stress_zz` and `plastic_strain_zz`.
 These are the accepted constitutive fields, distinct from numerical face forces.
 
 Use `--output-dir PATH` to change the destination or `--no-export` to run only
-numerical checks. Re-running replaces matching outputs and the PVD collection;
+numerical checks. Re-running the same Jacobian type replaces its matching outputs
+and PVD collection;
 unrelated files in `results/` remain intact. If a shorter history is exported,
 older unreferenced VTUs may remain but are not included in the new collection.
 
@@ -718,7 +742,7 @@ To inspect the accepted fields programmatically:
 ```python
 from coupling.plastic_plane_strain import run_example
 
-result = run_example()  # quiet by default; verbose=True prints the console report
+result = run_example()  # quiet; verbose=True shows Newton, show_l2_errors=True shows L2
 state = result.controller.state
 records = result.controller.steps
 checks = result.checks
@@ -728,15 +752,31 @@ peak_stress_error = checks[19].errors["stress"]
 
 The Python API exports only when requested: `run_example(output_dir="results")`
 returns the generated paths in `result.outputs` (keys `pvd`, `stress_strain`,
-`alpha`). To export an existing result without solving again:
+`alpha`, `jacobian`). To export the field history of an existing result without
+solving again:
 
 ```python
 from coupling.visualization import export_plastic_history
 
 paths = export_plastic_history(
     result.case.grid, result.controller.steps, folder_name="results",
+    file_name="plastic_plane_strain_analytical",  # Match the method used for this result.
 )
 ```
+
+A separate heatmap can be exported for any assembled coupled matrix:
+
+```python
+from coupling.visualization import export_jacobian_png
+
+path = export_jacobian_png(matrix, folder_name="results", file_name="jacobian")
+```
+
+The helper accepts dense or sparse matrices in `[u,r,p]` order, preserves their
+values, and densifies sparse input for plotting. It does not assemble a Jacobian.
+Use `linthresh` to change the linear interval of the color scale. The runner's
+snapshot is evaluated at the converged peak; it is not a saved matrix from an
+earlier Newton correction. `--no-export` also suppresses this PNG.
 
 The result also exposes `case`, `operators`, and `transfer`. Configure
 `--cells-per-axis`, `--loading-steps`, `--unloading-steps`, `--peak-strain`,

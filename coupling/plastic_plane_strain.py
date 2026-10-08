@@ -12,13 +12,13 @@ import numpy as np
 from numpy.typing import NDArray
 from porepy.applications.convergence_analysis import ConvergenceAnalysis
 
-from coupling.jacobian import AnalyticalJacobian
+from coupling.jacobian import AnalyticalJacobian, FiniteDifferenceJacobian
 from coupling.loading import JacobianFactory, LoadStepController, LoadStepError, LoadStepResult
 from coupling.newton import print_newton_convergence
 from coupling.plane_strain import PlaneStrainTpsa
 from coupling.residual import TpsaOperators, TpsaState, assemble_global_residual
 from coupling.transfer import CellToFaceTransfer
-from coupling.visualization import export_plastic_history
+from coupling.visualization import export_jacobian_png, export_plastic_history
 
 
 class NumericalCheckError(RuntimeError):
@@ -211,6 +211,7 @@ def run_example(
     jacobian: str = "analytical",
     max_iterations: int = 20,
     verbose: bool = False,
+    show_l2_errors: bool = False,
     output_dir: str | Path | None = None,
 ) -> PlasticPlaneStrainResult:
     """Run constrained x-extension on the unit square, then small elastic unloading.
@@ -221,10 +222,14 @@ def run_example(
     BEFORE solving. Return the model and every accepted state/check; exceptions
     propagate on either Newton failure or a failed numerical check. If output_dir
     is supplied, export the accepted history to VTK/PVD and PNG after all checks
-    pass. With output_dir=None (the Python default), no output files are created.
+    pass, including a Jacobian heatmap at the converged peak loading state.
+    Every output filename includes the selected jacobian type.
+    With output_dir=None (the Python default), no output files are created.
     jacobian selects "analytical" (default) or "finite-difference"; the latter
     alone uses finite_difference_step. Both keep the coupled [u,r,p] solve.
     verbose=True prints per-iteration residual norms and observed momentum rates.
+    show_l2_errors=True independently enables the L2 error summary (off by default).
+    Numerical checks always run and retain their errors in the returned checks.
     """
     if jacobian not in ("analytical", "finite-difference"):
         raise ValueError("jacobian must be 'analytical' or 'finite-difference'.")
@@ -271,14 +276,35 @@ def run_example(
             ru, rr, rp = check.residual_norms
             print(f"{index:4d} {check.phase:9s} {factor:7.4f} {check.iterations:7d} {ru:13.3e} {rr:13.3e} {rp:13.3e} {check.alpha_max:13.3e}")
             print_newton_convergence(record.newton)
-    if verbose:
+    if show_l2_errors:
         print("Maximum absolute discrete L2 errors over all accepted steps:")
         for name, unit in _ERROR_UNITS.items():
             print(f"  {name}: {max(check.errors[name] for check in checks):.3e} [{unit}]")
+    if verbose:
         print("Numerical checks: PASS (equilibrium, analytical J2 response, plane strain, elastic unloading)")
-    outputs = {} if output_dir is None else export_plastic_history(
-        case.grid, controller.steps, folder_name=output_dir,
-    )
+    outputs: dict[str, Path] = {}
+    if output_dir is not None:
+        records = controller.steps
+        peak_record = records[loading_steps - 1]
+        # Differentiate the peak increment from its PREVIOUS committed history.
+        # Using the peak itself as old would turn it into a zero-increment tangent.
+        old = initial if loading_steps == 1 else records[loading_steps - 2].state
+        peak_jacobian = (
+            AnalyticalJacobian(operators, transfer, case.material_points, old)
+            if jacobian == "analytical" else FiniteDifferenceJacobian(
+                operators, transfer, case.material_points, old, step=finite_difference_step,
+            )
+        )
+        matrix = peak_jacobian(peak_record.state.x, peak_record.newton.evaluation)
+        file_name = f"plastic_plane_strain_{jacobian}"
+        outputs = export_plastic_history(
+            case.grid, records, folder_name=output_dir, file_name=file_name,
+        )
+        outputs["jacobian"] = export_jacobian_png(
+            matrix, folder_name=output_dir, file_name=f"{file_name}_jacobian",
+            title=(f"Coupled Jacobian — {jacobian}\n"
+                   f"Peak loading: step {loading_steps}, factor {peak_record.load_factor:g} (converged)"),
+        )
     if verbose:
         for name, path in outputs.items():
             print(f"Output ({name}): {path}")
@@ -297,6 +323,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--max-iterations", type=int, default=20)
     parser.add_argument("--output-dir", type=Path, default=Path("results"), help="VTK/PNG directory (default: results).")
     parser.add_argument("--no-export", action="store_true", help="Run numerical checks without writing files.")
+    parser.add_argument("--show-l2-errors", action="store_true", help="Print the L2 error summary (hidden by default; numerical checks always run).")
     args = parser.parse_args(argv)
     try:
         run_example(
@@ -304,6 +331,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             unloading_steps=args.unloading_steps, peak_strain=args.peak_strain,
             unload_fraction=args.unload_fraction, finite_difference_step=args.fd_step,
             jacobian=args.jacobian, max_iterations=args.max_iterations, verbose=True,
+            show_l2_errors=args.show_l2_errors,
             output_dir=None if args.no_export else args.output_dir,
         )
     except (ValueError, LoadStepError, NumericalCheckError, OSError) as error:

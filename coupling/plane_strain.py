@@ -334,6 +334,10 @@ def main() -> None:
         "--output-dir", type=Path, default=Path("results"),
         help="VTK and strain PNG output directory (default: results).",
     )
+    parser.add_argument(
+        "--show-l2-errors", action="store_true",
+        help="Print the L2 error report (hidden by default).",
+    )
     args = parser.parse_args()
     case = PlaneStrainTpsa()
     case.solve()
@@ -375,13 +379,14 @@ def main() -> None:
         f"{Tpsa(KEYWORD).ndof(g)} global unknowns"
     )
     print(f"Material points: {len(case.material_points)} (initialized 3D histories)")
-    print("Absolute discrete L2 errors against the affine elastic solution (norm units):")
-    for name, (exact, numerical, is_cc) in comparisons.items():
-        error = ConvergenceAnalysis.lp_error(
-            grid=g, true_array=exact, approx_array=numerical,
-            is_cc=is_cc, p=2, relative=False,
-        )
-        print(f"  {name}: {error:.3e}")
+    if args.show_l2_errors:
+        print("Absolute discrete L2 errors against the affine elastic solution (norm units):")
+        for name, (exact, numerical, is_cc) in comparisons.items():
+            error = ConvergenceAnalysis.lp_error(
+                grid=g, true_array=exact, approx_array=numerical,
+                is_cc=is_cc, p=2, relative=False,
+            )
+            print(f"  {name}: {error:.3e}")
     print(f"Reference sigma_zz: {case.reference_stress()[2, 2]:.6e} Pa")
     pvd = export_vtk(g, x, epsilon=epsilon, folder_name=args.output_dir)
     pngs = export_strain_png(g, epsilon, folder_name=args.output_dir)

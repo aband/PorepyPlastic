@@ -2,3 +2,8 @@
 /docs/*.aux
 /docs/*.log
 /docs/*.out
+
+# Generated output directories and PDF files
+/output/
+/outputs/
+*.pdf

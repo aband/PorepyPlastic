@@ -9,11 +9,13 @@ import xml.etree.ElementTree as ET
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+from matplotlib.colors import SymLogNorm
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, FancyArrowPatch
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MaxNLocator, SymmetricalLogLocator
 import numpy as np
 import porepy as pp
+import scipy.sparse as sps  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from porepy.grids.grid import Grid
 from porepy.viz.exporter import DataInput
@@ -312,6 +314,69 @@ def _export_principal_strain_png(
         fig.savefig(path, bbox_inches="tight", pad_inches=0.1)
     finally:
         plt.close(fig)
+
+
+def export_jacobian_png(
+    matrix: sps.spmatrix | sps.sparray | NDArray[np.float64],
+    *,
+    folder_name: str | Path = "results",
+    file_name: str = "jacobian",
+    title: str = "Coupled TPSA Jacobian",
+    linthresh: float = 1e-12,
+) -> Path:
+    """Plot signed entries of a coupled [u,r,p] Jacobian and return its PNG path.
+
+    Accept a finite (4*nc,4*nc) dense or sparse matrix. Rows are [R_u,R_r,R_p];
+    columns are [u,r,p], with displacement components interleaved by cell.
+    Sparse input is densified for this diagnostic heatmap. Values retain their
+    block-dependent SI units; no row/column normalization is applied.
+    Symmetric-log colors preserve sign and are linear within +/-linthresh.
+    Zero is white, negative entries blue, positive entries red. The matrix and
+    existing figures are preserved. This function does not assemble a Jacobian.
+    """
+    if len(matrix.shape) != 2 or matrix.shape[0] != matrix.shape[1] or matrix.shape[0] == 0 or matrix.shape[0] % 4:
+        raise ValueError("Expected a square coupled Jacobian with shape (4*nc, 4*nc).")
+    if not np.isfinite(linthresh) or linthresh <= 0:
+        raise ValueError("linthresh must be finite and positive.")
+    if not file_name or Path(file_name).name != file_name or file_name in (".", ".."):
+        raise ValueError("file_name must be a nonempty file prefix without directories.")
+    values = np.asarray(matrix if isinstance(matrix, np.ndarray) else matrix.toarray(), dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("The Jacobian must contain only finite values.")
+    size = values.shape[0]
+    nc = size // 4
+    limit = max(float(np.max(np.abs(values))), linthresh)
+    norm = SymLogNorm(linthresh=linthresh, vmin=-limit, vmax=limit, base=10)
+    folder = Path(folder_name)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{file_name}.png"
+    with plt.rc_context({"font.size": 10, "savefig.dpi": 180}):
+        fig, axes = plt.subplots(figsize=(8.0, 7.0))
+        try:
+            heatmap = axes.imshow(values, cmap="RdBu_r", norm=norm,
+                                  interpolation="nearest", origin="upper", aspect="equal")
+            centers = np.array([nc, 2.5 * nc, 3.5 * nc]) - 0.5
+            axes.set_xticks(centers, [r"$u$", r"$r$", r"$p$"])
+            axes.set_yticks(centers, [r"$R_u$", r"$R_r$", r"$R_p$"])
+            for boundary in (2 * nc - 0.5, 3 * nc - 0.5):
+                axes.axhline(boundary, color="0.25", linestyle="--", linewidth=0.8)
+                axes.axvline(boundary, color="0.25", linestyle="--", linewidth=0.8)
+            axes.set_xlabel("Unknown columns (displacement interleaved by cell)")
+            axes.set_ylabel("Residual rows")
+            axes.set_title(title, fontsize=12, pad=12)
+            ticks = SymmetricalLogLocator(linthresh=linthresh, base=10)
+            ticks.set_params(numticks=9)
+            colorbar = fig.colorbar(heatmap, ax=axes, fraction=0.047, pad=0.045, ticks=ticks)
+            colorbar.set_label("Jacobian entry (symmetric log scale)")
+            fig.text(0.5, 0.065, f"{size} × {size} matrix · Raw entries in block-dependent SI units",
+                     ha="center", fontsize=9)
+            fig.text(0.5, 0.035, f"Blue: negative · White: zero · Red: positive · Linear for |entry| ≤ {linthresh:g}",
+                     ha="center", fontsize=9)
+            fig.subplots_adjust(left=0.12, right=0.85, bottom=0.17, top=0.86)
+            fig.savefig(path, bbox_inches="tight", pad_inches=0.15)
+        finally:
+            plt.close(fig)
+    return path
 
 
 def export_plastic_history(
