@@ -1,7 +1,7 @@
-"""Render the one-page default-case note; run from any working directory.
+"""Render the one-page original-formulation note; run from any working directory.
 
-The text describes the defaults verified on 7 October 2026; update it when
-changing the solver defaults. The companion .tex contains the same description.
+The text describes the original formulation with the fixed schedule verified
+on 7 October 2026; select --formulation original to reproduce it. The companion .tex contains the same description.
 """
 
 from pathlib import Path
@@ -65,7 +65,7 @@ label('Plastic plane strain', left, y, size=22, weight='bold')
 y += 29
 label('Boundary conditions and solver settings', left, y, size=12, color=accent)
 y += 21
-label('Default run • coupling/plastic_plane_strain.py • 7 October 2026', left, y, size=8.5, color=grey)
+label('Original formulation • examples/plastic_plane_strain.py • 7 October 2026', left, y, size=8.5, color=grey)
 y += 20
 
 heading('Problem and prescribed displacement')
@@ -96,15 +96,15 @@ para('These are unweighted Euclidean norms of raw integrated residuals in each b
 para('Local return-map Newton: at most 20 corrections; tolerance = 10⁻¹⁰ Pa + 10⁻¹² S, where S is the larger of the shifted trial deviatoric-stress norm and √(2/3) K(αn). Optional --jacobian finite-difference uses local forward differences with gradient perturbation 10⁻¹⁰ (--fd-step), with the same global assembly.', size=9.0)
 
 heading('Checks and execution')
-para('Every accepted step is checked for equilibrium, agreement with the independent homogeneous J2 reference, plane strain and elastic unloading. The default run first detects yield at step 8 (ℓ = 0.4). Newton convergence is printed; L2 field-error reporting is opt-in (--show-l2-errors).', size=9.0)
-label('python -m coupling.plastic_plane_strain --no-export', left, y, size=8.8, family='DejaVu Sans Mono')
+para('Every accepted step is checked for equilibrium, agreement with the independent homogeneous J2 reference, plane strain and elastic unloading. This run first detects yield at step 8 (ℓ = 0.4). Newton convergence is printed; L2 field-error reporting is opt-in (--show-l2-errors).', size=9.0)
+label('python -m examples.plastic_plane_strain --formulation original --no-export', left, y, size=7.5, family='DejaVu Sans Mono')
 y += 17
 para('Omit --no-export to write PNGs and VTK/PVD collections under results/.', size=8.6, color=grey, gap=0)
 assert y < 800, f'Content extends to {y:.1f} pt'
-label('Source: plastic_plane_strain.py; plane_strain.py; loading.py; newton.py;', left, 803, size=7.3, color=grey)
-label('residual.py; jacobian.py; transfer.py; material_state.py; scalar_hardening.py; J2.py (repository files).', left, 814, size=7.3, color=grey)
+label('Source: examples/plastic_plane_strain.py; alternatives/{plane_strain,loading,newton}.py;', left, 803, size=7.3, color=grey)
+label('alternatives/original/{residual,jacobian}.py; utils/transfer.py; material/{material_state,scalar_hardening,J2}.py.', left, 814, size=7.3, color=grey)
 metadata = {'Title': 'Plastic plane strain — boundary conditions and solver settings', 'Author': 'PorepyPlastic',
-            'Subject': 'Default fully coupled TPSA J2 plasticity benchmark',
+            'Subject': 'Original formulation of the TPSA J2 plasticity benchmark',
             'CreationDate': datetime(2026, 10, 7, tzinfo=timezone.utc)}
 fig.savefig(OUT, format='pdf', metadata=metadata)
 print(f'Wrote {OUT}; content ends at {y:.1f} / {H:.1f} pt')

@@ -2,7 +2,7 @@
 
 ## Implementation
 
-1. Implement adaptive load incrementation with automatic step-size control.
+1. **Completed:** adaptive load incrementation with automatic step-size control.
 2. Implement least-squares strain reconstruction and compare it with the
    Green–Gauss approach.
 3. Extend boundary-condition support to include Neumann and Robin conditions.

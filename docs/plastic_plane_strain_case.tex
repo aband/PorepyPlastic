@@ -19,7 +19,7 @@
 \fontsize{9.4}{12.4}\selectfont
 {\LARGE\bfseries Plastic plane strain}\par
 {\large\color{accent}Boundary conditions and solver settings}\par
-{\small Default run: \texttt{coupling/plastic\_plane\_strain.py}; 7 October 2026.}
+{\small Original formulation: \texttt{examples/plastic\_plane\_strain.py}; 7 October 2026.}
 
 \topic{Problem and prescribed displacement}
 Small-strain, quasi-static J2 plasticity on a $1\,\mathrm{m}\times1\,\mathrm{m}$
@@ -92,18 +92,19 @@ global assembly.
 
 \topic{Checks and execution}
 Every accepted step is checked for equilibrium, agreement with the independent
-homogeneous J2 reference, plane strain and elastic unloading. The default run
+homogeneous J2 reference, plane strain and elastic unloading. This run
 first detects yield at step 8 ($\ell=0.4$). Newton convergence is printed;
 L2 field-error reporting is opt-in (\texttt{--show-l2-errors}).
 
-\texttt{python -m coupling.plastic\_plane\_strain --no-export}
+\texttt{python -m examples.plastic\_plane\_strain --formulation original --no-export}
 
 Omit \texttt{--no-export} to write PNGs and VTK/PVD collections under
 \texttt{results/}.
 
 \vfill
-{\scriptsize Source (repository files): \texttt{coupling/}\{\texttt{plastic\_plane\_strain.py},
-\texttt{plane\_strain.py}, \texttt{loading.py}, \texttt{newton.py},
-\texttt{residual.py}, \texttt{jacobian.py}, \texttt{transfer.py}\};
-\texttt{material\_state.py}, \texttt{scalar\_hardening.py}, \texttt{J2.py}.}
+{\scriptsize Source (repository files): \texttt{examples/plastic\_plane\_strain.py};
+\texttt{alternatives/}\{\texttt{plane\_strain.py}, \texttt{loading.py}, \texttt{newton.py}\};
+\texttt{alternatives/original/}\{\texttt{residual.py}, \texttt{jacobian.py}\};
+\texttt{utils/transfer.py};
+\texttt{material/}\{\texttt{material\_state.py}, \texttt{scalar\_hardening.py}, \texttt{J2.py}\}.}
 \end{document}
