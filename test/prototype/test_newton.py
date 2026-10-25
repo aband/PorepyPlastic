@@ -12,11 +12,11 @@ from utils.newton_utils import JacobianMatrix, NewtonConvergenceError, newton_co
 from alternatives.plane_strain import PlaneStrainTpsa
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
-from core import newton
-from core.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
-from core.newton import BacktrackingOptions, solve_newton
-from core.operators import RetainedFaceOperators
-from core.residual import RetainedFaceResidual, evaluate_global_residual
+from prototype import newton
+from prototype.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
+from prototype.newton import BacktrackingOptions, solve_newton
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import RetainedFaceResidual, evaluate_global_residual
 from material.tensor import strain
 
 FloatArray: TypeAlias = NDArray[np.float64]

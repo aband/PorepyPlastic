@@ -12,8 +12,8 @@ from porepy.utils.common_constants import PARAMETERS
 from alternatives.coupled.residual import CoupledOperators
 from utils.reconstruction import mandel
 from alternatives.plane_strain import KEYWORD, PlaneStrainTpsa, _assemble_matrices, _discretize_get_matrices
-from core.operators import RetainedFaceOperators
-from core.residual import evaluate_one_sided_traction
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import evaluate_one_sided_traction
 
 
 def make_operators(

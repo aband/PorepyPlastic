@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 from utils.problem import PlaneStrainProblem
 from utils.state import TpsaState
-from core.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
-from core.loading import JacobianFactory, LoadStepController
-from core.newton import JacobianCallback
-from core.operators import RetainedFaceOperators
-from core.state import RetainedState
+from prototype.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
+from prototype.loading import JacobianFactory, LoadStepController
+from prototype.newton import JacobianCallback
+from prototype.operators import RetainedFaceOperators
+from prototype.state import RetainedState
 
 
 @dataclass(eq=False)

@@ -9,7 +9,7 @@ import pytest
 
 from examples import plastic_plane_strain as homogeneous
 from utils.load_schedule import AdaptiveLoadOptions
-from core.loading import LoadStepController
+from prototype.loading import LoadStepController
 from utils.problem import PlaneStrainProblem
 from alternatives.plane_strain import PlaneStrainTpsa
 from examples import dirichlet_example as nonuniform

@@ -15,11 +15,11 @@ from examples import plastic_plane_strain as homogeneous
 from utils.load_schedule import AdaptiveLoadOptions, LoadStepError
 from utils.visualization import export_jacobian_png
 from examples import dirichlet_example as nonuniform
-from core.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
-from core.loading import LoadStepController
-from core.operators import RetainedFaceOperators
-from core.residual import evaluate_global_residual
-from core.state import assemble_state_residual
+from prototype.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
+from prototype.loading import LoadStepController
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import evaluate_global_residual
+from prototype.state import assemble_state_residual
 
 Runner: TypeAlias = Callable[..., homogeneous.PlasticPlaneStrainResult | nonuniform.DirichletResult]
 

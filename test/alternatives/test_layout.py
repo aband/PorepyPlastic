@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 
-def test_alternatives_import_without_core() -> None:
+def test_alternatives_import_without_prototype() -> None:
     script = """
 import importlib
 import sys
@@ -23,7 +23,7 @@ for module in (
     'alternatives.plane_strain', 'alternatives.postprocessing',
 ):
     importlib.import_module(module)
-assert not any(name.split('.')[0] == 'core' for name in sys.modules)
+assert not any(name.split('.')[0] == 'prototype' for name in sys.modules)
 """
     result = subprocess.run(
         [sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[2],

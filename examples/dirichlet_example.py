@@ -52,7 +52,7 @@ class DirichletResult:
 
 def run_example(
     *,
-    cells_per_axis: int = 10,
+    cells_per_axis: int = 20,
     formulation: str = DEFAULT_FORMULATION,
     jacobian: Literal["analytical", "finite-difference"] = "analytical",
     adaptive: bool = False,

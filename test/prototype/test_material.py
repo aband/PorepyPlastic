@@ -11,8 +11,8 @@ from numpy.typing import NDArray
 from alternatives.plane_strain import PlaneStrainTpsa
 from utils.state import TpsaState
 from material.material_state import MaterialState
-from core.operators import RetainedFaceOperators
-from core.residual import RetainedFaceResidual, evaluate_global_residual
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import RetainedFaceResidual, evaluate_global_residual
 from material.tensor import strain
 
 Setup: TypeAlias = tuple[PlaneStrainTpsa, RetainedFaceOperators, TpsaState]

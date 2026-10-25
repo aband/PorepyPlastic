@@ -14,9 +14,9 @@ from utils.reconstruction import mandel
 from alternatives.plane_strain import PlaneStrainTpsa
 from utils.state import TpsaState
 from material.material_state import MaterialPoint, MaterialState
-from core.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
-from core.operators import RetainedFaceOperators
-from core.residual import (
+from prototype.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import (
     RetainedFaceResidual, assemble_global_residual, evaluate_global_residual, evaluate_one_sided_traction,
 )
 from material.tensor import strain

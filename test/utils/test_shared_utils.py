@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 import pytest
 
 from alternatives.plane_strain import PlaneStrainTpsa
-from core.runner import prepare_retained_solver
+from prototype.runner import prepare_retained_solver
 from utils.problem import PlaneStrainProblem
 
 
@@ -25,8 +25,8 @@ for module in (
     'utils.newton_utils', 'utils.visualization', 'utils.formulation',
 ):
     importlib.import_module(module)
-assert not any(name.split('.')[0] in ('alternatives', 'core') for name in sys.modules)
-from core.runner import prepare_retained_solver
+assert not any(name.split('.')[0] in ('alternatives', 'prototype') for name in sys.modules)
+from prototype.runner import prepare_retained_solver
 assert not any(name.split('.')[0] == 'alternatives' for name in sys.modules)
 """
     result = subprocess.run(

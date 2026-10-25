@@ -8,8 +8,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from utils.state import TpsaState
-from core.operators import RetainedFaceOperators
-from core.residual import assemble_global_residual
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import assemble_global_residual
 
 from utils.state import (
     as_tpsa_state as as_tpsa_state,

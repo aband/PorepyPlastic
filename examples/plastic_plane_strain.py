@@ -13,9 +13,9 @@ from numpy.typing import NDArray
 from porepy.applications.convergence_analysis import ConvergenceAnalysis
 
 from examples._solver_setup import prepare_solver, problem_type
-from core.loading import RetainedLoadStepResult
-from core.operators import RetainedFaceOperators
-from core.state import RetainedState, assemble_state_residual
+from prototype.loading import RetainedLoadStepResult
+from prototype.operators import RetainedFaceOperators
+from prototype.state import RetainedState, assemble_state_residual
 from utils.formulation import DEFAULT_FORMULATION, FORMULATION_CHOICES, FormulationName, select_formulation
 from utils.load_schedule import AdaptiveLoadOptions, LoadStepError
 from utils.newton_utils import print_newton_convergence

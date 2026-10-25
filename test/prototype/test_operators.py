@@ -7,7 +7,7 @@ from porepy.grids.structured import CartGrid, TensorGrid
 from porepy.params.bc import BoundaryConditionVectorial
 
 from alternatives.plane_strain import PlaneStrainTpsa
-from core.operators import RetainedFaceOperators
+from prototype.operators import RetainedFaceOperators
 
 
 def make_operators(grid: TensorGrid) -> RetainedFaceOperators:

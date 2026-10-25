@@ -14,11 +14,11 @@ from utils.load_schedule import LoadAttempt, LoadStepError, _LoadStepSchedule
 from utils.newton_utils import NewtonConvergenceError, _residual_block_norms, _validate_newton_options
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
-from core.newton import (
+from prototype.newton import (
     BacktrackingOptions, BlockTolerances, JacobianCallback, RetainedNewtonResult, solve_newton,
 )
-from core.operators import RetainedFaceOperators
-from core.state import RetainedState, assemble_state_residual
+from prototype.operators import RetainedFaceOperators
+from prototype.state import RetainedState, assemble_state_residual
 
 JacobianFactory: TypeAlias = Callable[[TpsaState], JacobianCallback]
 

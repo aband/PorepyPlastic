@@ -12,8 +12,8 @@ from utils.reconstruction import MANDEL_BASIS
 from material.tangent import _validate_step, analytical_material_tangent, finite_difference_material_tangent
 from utils.state import TpsaState
 from material.material_state import MaterialPoint, MaterialState
-from core.operators import RetainedFaceOperators
-from core.residual import RetainedFaceResidual
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import RetainedFaceResidual
 
 
 class RetainedAnalyticalJacobian:

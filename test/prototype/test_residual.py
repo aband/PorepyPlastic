@@ -11,8 +11,8 @@ from porepy.utils.common_constants import PARAMETERS
 
 from alternatives.plane_strain import KEYWORD, PlaneStrainTpsa, _assemble_matrices, _discretize_get_matrices
 from alternatives.postprocessing import reconstruct_face_displacement
-from core.operators import RetainedFaceOperators
-from core.residual import assemble_global_residual, evaluate_one_sided_traction
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import assemble_global_residual, evaluate_one_sided_traction
 
 
 def make_operators(

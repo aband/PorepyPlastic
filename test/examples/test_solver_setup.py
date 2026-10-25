@@ -1,4 +1,4 @@
-"""Default examples use core without loading the optional formulations."""
+"""Default examples use prototype without loading the optional formulations."""
 
 from pathlib import Path
 import subprocess
@@ -21,7 +21,7 @@ import sys
 runner = importlib.import_module('examples.' + sys.argv[1])
 result = runner.run_example(cells_per_axis=2, jacobian=sys.argv[2], output_dir=Path(sys.argv[3]))
 assert result.formulation == 'retained'
-assert result.controller.__class__.__module__ == 'core.loading'
+assert result.controller.__class__.__module__ == 'prototype.loading'
 assert result.case.__class__.__module__ == 'utils.problem'
 assert result.controller.load_factor == 0.98
 assert result.outputs and all(path.is_file() for path in result.outputs.values())

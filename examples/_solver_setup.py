@@ -6,9 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
-from core.loading import LoadStepController as RetainedController, RetainedLoadStepResult
-from core.operators import RetainedFaceOperators
-from core.runner import prepare_retained_solver
+from prototype.loading import LoadStepController as RetainedController, RetainedLoadStepResult
+from prototype.operators import RetainedFaceOperators
+from prototype.runner import prepare_retained_solver
 from utils.formulation import FormulationName
 from utils.newton_utils import JacobianMatrix
 from utils.problem import PlaneStrainProblem

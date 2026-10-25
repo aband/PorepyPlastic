@@ -12,9 +12,9 @@ from numpy.typing import NDArray
 from utils.newton_utils import JacobianMatrix, NewtonConvergenceError, _residual_block_norms, _solve_linear_correction, _validate_newton_options
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
-from core.jacobian import RetainedAnalyticalJacobian
-from core.operators import RetainedFaceOperators
-from core.residual import RetainedFaceResidual, evaluate_global_residual
+from prototype.jacobian import RetainedAnalyticalJacobian
+from prototype.operators import RetainedFaceOperators
+from prototype.residual import RetainedFaceResidual, evaluate_global_residual
 
 JacobianCallback: TypeAlias = Callable[[NDArray[np.float64], RetainedFaceResidual], JacobianMatrix]
 BlockTolerances: TypeAlias = tuple[float, float, float, float]

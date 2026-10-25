@@ -3,7 +3,7 @@
 The original residual/Jacobian pair lives in alternatives/original/.
 The coupled formulation uses alternatives/coupled/;
 its strain unknowns and complementary face feedback are solved monolithically.
-The retained formulation uses core/ and solves increments in
+The retained formulation uses prototype/ and solves increments in
 cell fields and free-face displacement, with nested constitutive updates.
 """
 

@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from utils.material_evaluation import TpsaMaterialTrial, evaluate_material_at_strain
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
-from core.operators import RetainedFaceOperators
+from prototype.operators import RetainedFaceOperators
 
 
 def evaluate_one_sided_traction(
