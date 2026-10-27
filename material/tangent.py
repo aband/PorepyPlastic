@@ -9,6 +9,11 @@ from material.material_state import MaterialPoint, MaterialState
 from material.tensor import strain, stress
 
 
+def _validate_dimension(dim: int) -> None:
+    if isinstance(dim, bool) or not isinstance(dim, (int, np.integer)) or dim not in (2, 3):
+        raise ValueError("Tangent dimension must be 2 or 3.")
+
+
 def _validate_step(step: float) -> None:
     if not np.isfinite(step) or step <= 0:
         raise ValueError("Finite-difference step must be finite and positive.")
@@ -19,21 +24,25 @@ def finite_difference_material_tangent(
     committed: MaterialState,
     strain_increment: NDArray[np.float64],
     *,
+    dim: int = 2,
     step: float = 1e-10,
 ) -> NDArray[np.float64]:
-    """Return d sigma[i,j] / d G[k,l], shape (3,3,2,2), by forward differences.
+    """Return d sigma[i,j] / d G[k,l], shape (3,3,dim,dim), by forward differences.
 
-    G is the in-plane displacement gradient. Perturbing G[k,l] by step changes
-    total strain by step * sym(e_k outer e_l); shear perturbations therefore
-    change BOTH symmetric strain entries by step/2. The full 3D return map keeps
-    out-of-plane stress and plastic history while varying only in-plane strain.
+    dim=2 varies the in-plane displacement gradient; dim=3 varies all components.
+    Perturbing G[k,l] by step changes strain by step * sym(e_k outer e_l), so
+    shear perturbations change BOTH symmetric strain entries by step/2.
+    Strain increments, stress output and histories remain full 3D in either case.
+    dim selects derivative directions; it does not restrict the supplied strain
+    increment or perform a plane-stress reduction.
 
-    Each of five local updates (baseline plus four perturbations) starts from
+    Each of 1 + dim**2 local updates (baseline plus perturbations) starts from
     the supplied committed history. point supplies only model/parameters; its
     committed/trial slots and all inputs remain unchanged, including on failure.
     step is an absolute dimensionless gradient perturbation, defaulting to the
     paper's 1e-10. At a yield switch this is a one-sided numerical derivative.
     """
+    _validate_dimension(dim)
     _validate_step(step)
     increment = np.array(strain_increment, dtype=np.float64, copy=True)
     if increment.shape != (3, 3) or not np.all(np.isfinite(increment)):
@@ -51,9 +60,9 @@ def finite_difference_material_tangent(
         return stress
 
     baseline = stress_at(increment)
-    tangent = np.empty((3, 3, 2, 2))
-    for k in range(2):
-        for l in range(2):
+    tangent = np.empty((3, 3, dim, dim))
+    for k in range(dim):
+        for l in range(dim):
             basis = np.zeros((3, 3))
             basis[k, l] += 0.5
             basis[l, k] += 0.5
@@ -71,11 +80,15 @@ def analytical_material_tangent(
     committed: MaterialState,
     strain_increment: NDArray[np.float64],
     *,
+    dim: int = 2,
     returned: MaterialState | None = None,
 ) -> NDArray[np.float64]:
-    """Return exact J2 d sigma[i,j]/d G[k,l], with shape (3,3,2,2).
+    """Return exact J2 d sigma[i,j]/d G[k,l], with shape (3,3,dim,dim).
 
     Use the same 3D radial return and scalar hardening laws as MaterialPoint.
+    dim=2 selects in-plane gradient variations; dim=3 selects all components.
+    The supplied strain increment and material histories remain full 3D;
+    dim only selects derivative directions, without a plane-stress reduction.
     Optionally reuse returned from that SAME increment and committed history;
     otherwise perform one isolated local update. No finite differences are used.
     The supplied point's committed/trial slots and all input states are preserved.
@@ -83,6 +96,7 @@ def analytical_material_tangent(
     Out-of-plane stress rows are retained. At a yield switch use the branch
     selected by the return map, rather than claiming a unique smooth derivative.
     """
+    _validate_dimension(dim)
     increment = np.asarray(strain_increment, dtype=np.float64)
     if (increment.shape != (3, 3) or not np.all(np.isfinite(increment))
             or not np.allclose(increment, increment.T, rtol=1e-10, atol=1e-14)):
@@ -101,4 +115,4 @@ def analytical_material_tangent(
         stress(predictor), committed.backstress, returned.alpha, float(dgamma),
         point.material, point.K_law, point.H_law, point.parameters,
     )
-    return tangent.to_numpy()[:, :, :2, :2]
+    return tangent.to_numpy()[:, :, :dim, :dim]

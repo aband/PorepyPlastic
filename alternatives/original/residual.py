@@ -21,7 +21,7 @@ from utils.state import (
 )
 
 from utils.material_evaluation import (
-    TpsaMaterialTrial as TpsaMaterialTrial,
+    MaterialTrial as MaterialTrial,
     evaluate_material_at_strain as evaluate_material_at_strain,
 )
 
@@ -150,7 +150,7 @@ def evaluate_material_trial(
     committed: TpsaState,
     x: NDArray[np.float64],
     bc_values: NDArray[np.float64],
-) -> TpsaMaterialTrial:
+) -> MaterialTrial:
     """Reconstruct a candidate and return cell material updates without committing.
 
     x stores the current [u, r, p], including unconverged coupled candidates.
@@ -184,7 +184,7 @@ def evaluate_face_traction(
     committed: TpsaState,
     x: NDArray[np.float64],
     bc_values: NDArray[np.float64],
-    material_trial: TpsaMaterialTrial,
+    material_trial: MaterialTrial,
 ) -> NDArray[np.float64]:
     """Return integrated numerical traction (2, nf) for a coupled trial [u, r, p].
 

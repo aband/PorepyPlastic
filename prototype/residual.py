@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from utils.material_evaluation import TpsaMaterialTrial, evaluate_material_at_strain
+from utils.material_evaluation import MaterialTrial, evaluate_material_at_strain
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
 from prototype.operators import RetainedFaceOperators
@@ -157,7 +157,7 @@ class RetainedFaceResidual:
     """Owned results of one candidate evaluated from fixed committed history.
 
     residual is unscaled [R_u,R_r,R_p,R_f], ordered like z. material_trial
-    reuses TpsaMaterialTrial: total strain, full 3D material histories, and Q.
+    reuses MaterialTrial: total strain, full 3D material histories, and Q.
     traction_increment is (2,num_sides), outward and integrated on each side.
     z and bc_values snapshot the matching candidate and absolute boundary data
     for Jacobian validation; unused interior boundary entries are stored as zero.
@@ -166,7 +166,7 @@ class RetainedFaceResidual:
     """
 
     residual: NDArray[np.float64]
-    material_trial: TpsaMaterialTrial
+    material_trial: MaterialTrial
     traction_increment: NDArray[np.float64]
     z: NDArray[np.float64]
     bc_values: NDArray[np.float64]

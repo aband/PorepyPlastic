@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from examples.dirichlet_example import main, run_example
+from examples._solver_setup import prepare_solver
 from alternatives.original.residual import TpsaOperators, assemble_global_residual
 from alternatives.loading import LoadStepController
 from alternatives.plane_strain import PlaneStrainTpsa
@@ -44,9 +45,20 @@ def test_nonuniform_example_equilibrates_and_jacobians_agree(adaptive: bool) -> 
             assert np.all(np.array([np.linalg.norm(block) for block in blocks]) <= record.newton.thresholds)
     assert isinstance(analytical.controller, LoadStepController)
     assert isinstance(numerical.controller, LoadStepController)
-    a, b = analytical.controller.state, numerical.controller.state
-    np.testing.assert_allclose(a.x, b.x, rtol=1e-6, atol=1e-3)
+    analytical_steps = analytical.controller.steps
+    numerical_steps = numerical.controller.steps
+    if adaptive:
+        # Newton iteration counts can produce different adaptive increments.
+        # Plastic history depends on those increments, so compare both Jacobians
+        # on the same accepted path, starting from a fresh initial state.
+        replay = prepare_solver(numerical.case, "original", "analytical").controller
+        assert isinstance(replay, LoadStepController)
+        analytical_steps = replay.run([record.load_factor for record in numerical_steps])
     nc = analytical.case.grid.num_cells
+    np.testing.assert_array_equal([step.load_factor for step in analytical_steps],
+                                  [step.load_factor for step in numerical_steps])
+    a, b = analytical_steps[-1].state, numerical_steps[-1].state
+    np.testing.assert_allclose(a.x, b.x, rtol=1e-6, atol=1e-3)
     np.testing.assert_allclose(a.x[:2 * nc], b.x[:2 * nc], rtol=1e-6, atol=1e-10)
     np.testing.assert_allclose(a.epsilon, b.epsilon, rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose([s.alpha for s in a.material_states],

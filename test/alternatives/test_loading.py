@@ -199,7 +199,10 @@ def test_failed_step_preserves_accepted_history_and_allows_retry(
     fail = True
     with monkeypatch.context() as patch:
         if failure == "material":
-            def broken_update(self: MaterialPoint, increment: strain) -> tuple[MaterialState, None]:
+            def broken_update(
+                self: MaterialPoint, increment: strain, tol: float = 1e-10,
+                *, rtol: float = 1e-12,
+            ) -> tuple[MaterialState, None]:
                 raise RuntimeError("Injected material failure")
             patch.setattr(MaterialPoint, "update", broken_update)
         with pytest.raises(LoadStepError) as caught:
@@ -335,10 +338,13 @@ def test_partial_material_failure_after_plastic_loading_preserves_state_and_retr
     completed: list[tuple[float, float]] = []
     injected_error = RuntimeError("Material failure after three updated cells")
 
-    def fail_on_fourth_cell(self: MaterialPoint, increment: strain) -> tuple[MaterialState, None]:
+    def fail_on_fourth_cell(
+        self: MaterialPoint, increment: strain, tol: float = 1e-10,
+        *, rtol: float = 1e-12,
+    ) -> tuple[MaterialState, None]:
         if len(completed) == 3:
             raise injected_error
-        result = update(self, increment)
+        result = update(self, increment, tol=tol, rtol=rtol)
         completed.append((self.committed.alpha, result[0].alpha))
         return result
 

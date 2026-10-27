@@ -10,7 +10,7 @@ from porepy.grids.grid import Grid
 from porepy.grids.structured import CartGrid
 
 from alternatives.plane_strain import PlaneStrainTpsa, _assemble_matrices, _discretize_get_matrices
-from utils.material_evaluation import TpsaMaterialTrial
+from utils.material_evaluation import MaterialTrial
 from alternatives.original.residual import TpsaOperators, evaluate_face_traction, evaluate_material_trial
 from utils.state import TpsaState
 from utils.transfer import CellToFaceTransfer
@@ -48,8 +48,8 @@ def affine_candidate(case: PlaneStrainTpsa, gradient: FloatArray) -> tuple[Float
     return x, boundary
 
 
-def zero_trial(nc: int) -> TpsaMaterialTrial:
-    return TpsaMaterialTrial(
+def zero_trial(nc: int) -> MaterialTrial:
+    return MaterialTrial(
         np.zeros((3, 3, nc)), [MaterialState() for _ in range(nc)], np.zeros((3, 3, nc)),
     )
 

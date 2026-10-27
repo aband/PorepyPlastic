@@ -1,11 +1,24 @@
 # Development plan
 
-The primary development path is the retained-displacement formulation in
-`prototype/`. The original and coupled formulations in `alternatives/` remain
-available for comparisons. See the [solver guide](docs/retained_solver.md)
-for the implemented algorithm and its current scope.
+Current development focuses on the dimension-aware retained-displacement solver
+in `core/`. The existing solver in `prototype/` and the original and coupled
+formulations in `alternatives/` remain available for reference and comparisons.
+See the [solver guide](docs/retained_solver.md) for the prototype algorithm and
+its current scope.
 
-## Completed foundation
+## Current work: dimension-aware core
+
+- [x] Add permanent integration tests for `ResidualAssembler.evaluate()` in 2D
+  and 3D, covering Dirichlet, Neumann and mixed boundaries; elastic loading,
+  yielding, unloading and reloading; and consistency of the returned material
+  trial, corrected tractions and all residual blocks. Verify repeatability,
+  preservation of committed history and forwarding of constitutive tolerances.
+- [ ] As an optional efficiency improvement, allow
+  `RetainedFaceOperators.elastic_one_sided_traction()` to reuse the full face
+  increments already computed by `ResidualAssembler.evaluate()`, avoiding a
+  second call to `face_displacement_increment()` while preserving existing callers.
+
+## Completed prototype foundation
 
 - [x] Reuse the 3D J2 return map, hardening laws and consistent material tangent.
 - [x] Implement retained-face kinematics, one-sided tractions and all four global
@@ -20,7 +33,7 @@ for the implemented algorithm and its current scope.
 - [x] Separate `prototype/`, `material/`, `utils/`, `alternatives/` and `examples/`;
   organize tests to match and document the current entry points.
 
-## Next: reproducible Jacobian comparison
+## Prototype: reproducible Jacobian comparison
 
 - [ ] Add a nonuniform benchmark comparing analytical and finite-difference
   Jacobians for the retained formulation.

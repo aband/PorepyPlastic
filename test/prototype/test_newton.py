@@ -254,7 +254,10 @@ def test_failure_preserves_history_and_existing_material_trials(failure: str, mo
         if failure == "callback":
             raise RuntimeError("Injected callback failure")
         if failure == "material":
-            def bad_update(self: MaterialPoint, increment: strain) -> None:
+            def bad_update(
+                self: MaterialPoint, increment: strain, tol: float = 1e-10,
+                *, rtol: float = 1e-12,
+            ) -> None:
                 raise RuntimeError("Injected material failure")
             monkeypatch.setattr(MaterialPoint, "update", bad_update)
         return matrix

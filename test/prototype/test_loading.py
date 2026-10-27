@@ -219,12 +219,15 @@ def test_failed_attempt_is_atomic_and_retry_matches_clean_solve(failure: str, mo
             original = MaterialPoint.update
             calls = 0
 
-            def failing_update(self: MaterialPoint, increment: strain) -> tuple[MaterialState, None]:
+            def failing_update(
+                self: MaterialPoint, increment: strain, tol: float = 1e-10,
+                *, rtol: float = 1e-12,
+            ) -> tuple[MaterialState, None]:
                 nonlocal calls
                 calls += 1
                 if calls == 3:
                     raise RuntimeError("Injected local failure after two cells")
-                return original(self, increment)
+                return original(self, increment, tol=tol, rtol=rtol)
 
             patch.setattr(MaterialPoint, "update", failing_update)
         elif failure == "acceptance":
@@ -235,6 +238,10 @@ def test_failed_attempt_is_atomic_and_retry_matches_clean_solve(failure: str, mo
         with pytest.raises(LoadStepError) as error:
             controller.run([.5, 1.])
     assert error.value.step_index == 2 and error.value.load_factor == .5
+    if failure == "material":
+        assert calls == 3
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert "Injected local failure after two cells" in str(error.value.__cause__)
     assert controller.load_factor == .25 and len(controller.steps) == 1
     assert [a.accepted for a in controller.attempts] == [True, False]
     assert_state_equal(controller.state, accepted.state)
