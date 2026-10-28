@@ -1,0 +1,22 @@
+{
+  "source_title": "A mixed finite element formulation for elastoplasticity",
+  "authors": "Nagler, Pechstein, Humer",
+  "doi": "10.1002/nme.7070",
+  "pdf_sha256": "707330416ce0831a04fe26e8f472ba8167b40c8ab4df716d255da71d0ee356d6",
+  "page": 12,
+  "figure": 3,
+  "series": "Abaqus reference (black curve)",
+  "method": "Digitized vector path 99, including cubic Bezier interpolation; axes calibrated from grid lines. Not raw Abaqus data.",
+  "axis_calibration": {
+    "x_zero_pt": 311.129,
+    "x_minus10_pt": 235.222,
+    "x_plus10_pt": 387.037,
+    "y_zero_pt": 115.943,
+    "y_minus0_6_pt": 178.26,
+    "y_plus0_6_pt": 53.628
+  },
+  "load_schedule": "40 equal traction increments, 0 -> +0.6 -> -0.6 -> 0 MPa, read from Figure 3 path and section 4.1",
+  "endpoint_A_mm": 12.74419581655716,
+  "endpoint_B_mm": -12.53644408516328,
+  "accuracy_note": "Approximate plotted values, not sufficient to claim sub-percent reproduction of raw reference data."
+}

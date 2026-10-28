@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from utils.state import TpsaState
+from prototype.tpsa_state import TpsaState as SpatialTpsaState
 from prototype.operators import RetainedFaceOperators
 from prototype.residual import assemble_global_residual
 
@@ -17,11 +18,11 @@ from utils.state import (
 
 
 class RetainedState:
-    """Reuse TpsaState and retain BOTH numerical traction histories per interface.
+    """Retain dimension-aware TpsaState and BOTH numerical traction histories per interface.
 
     tpsa holds total cell u,r,p, face displacement, total strain, and 3D material
-    histories. side_traction (2,num_sides) stores total outward integrated forces
-    in operators.side order. body_force (2,num_cells) stores the absolute
+    histories. side_traction (dim,num_sides) stores total outward integrated forces
+    in operators.side order. body_force (dim,num_cells) stores the absolute
     integrated load belonging to this state. All inputs are copied and validated.
 
     tpsa.traction is regenerated as the average of signed side tractions in the
@@ -37,17 +38,21 @@ class RetainedState:
     def __init__(
         self, operators: RetainedFaceOperators, tpsa: TpsaState,
         side_traction: NDArray[np.float64], body_force: NDArray[np.float64],
+        *, neumann_values: NDArray[np.float64] | None = None,
     ) -> None:
-        nc, nf = operators.num_cells, operators.num_faces
+        nc, nf, nd = operators.num_cells, operators.num_faces, operators.dim
         side = np.array(side_traction, dtype=np.float64, copy=True)
         body = np.array(body_force, dtype=np.float64, copy=True)
+        neumann = (np.zeros((nd, operators.neumann_faces.size)) if neumann_values is None
+                   else np.array(neumann_values, dtype=np.float64, copy=True))
         for name, values, shape in (
-            ("side_traction", side, (2, operators.num_sides)),
-            ("body_force", body, (2, nc)),
+            ("side_traction", side, (operators.dim, operators.num_sides)),
+            ("body_force", body, (nd, nc)),
+            ("neumann_values", neumann, (nd, operators.neumann_faces.size)),
         ):
             if values.shape != shape or not np.all(np.isfinite(values)):
                 raise ValueError(f"Expected finite {name} with shape {shape}.")
-        if len(tpsa.material_states) != nc or tpsa.bc_values.shape != (2, nf):
+        if len(tpsa.material_states) != nc or tpsa.bc_values.shape != (nd, nf):
             raise ValueError("Committed cell and face counts must match the retained operators.")
         if tpsa.face_displacement is None:
             raise ValueError("Retained states require total face_displacement.")
@@ -57,24 +62,25 @@ class RetainedState:
             np.bincount(faces, weights=component * operators.side_signs, minlength=nf) / count
             for component in side
         ])
-        state = TpsaState(tpsa.x, tpsa.bc_values, tpsa.epsilon, tpsa.material_states,
+        state = SpatialTpsaState(tpsa.x, tpsa.bc_values, tpsa.epsilon, tpsa.material_states,
                           oriented, face_displacement=tpsa.face_displacement)
         assert state.face_displacement is not None
-        bf = operators.boundary_faces
+        bf = operators.dirichlet_faces
         if not np.allclose(state.face_displacement[:, bf], state.bc_values[:, bf], rtol=1e-10, atol=1e-12):
             raise ValueError("Total face displacement must match the committed Dirichlet data.")
         state.bc_values[:, operators.free_faces] = 0.0
         total = operators.pack(state.x, state.face_displacement[:, operators.free_faces])
-        reconstructed = operators.strain_increment(total, state.bc_values, np.zeros((2, nf)))
+        reconstructed = operators.strain_increment(total, state.bc_values, np.zeros((nd, nf)))
         if not np.allclose(state.epsilon, reconstructed, rtol=1e-8, atol=1e-10):
             raise ValueError("Committed total strain must match the stored face displacement.")
         self.tpsa, self.side_traction, self.body_force = state, side, body
+        self.neumann_values = neumann
 
     @classmethod
     def zeros(cls, operators: RetainedFaceOperators) -> RetainedState:
         """Undeformed, unstressed state with zero loads and total face histories."""
-        return cls(operators, TpsaState.zeros(operators.grid, store_faces=True),
-                   np.zeros((2, operators.num_sides)), np.zeros((2, operators.num_cells)))
+        return cls(operators, SpatialTpsaState.zeros(operators.grid, store_faces=True),
+                   np.zeros((operators.dim, operators.num_sides)), np.zeros((operators.dim, operators.num_cells)))
 
     def copy(self) -> RetainedState:
         """Independent copy of every array and material history; no shared grid."""
@@ -95,4 +101,5 @@ def assemble_state_residual(operators: RetainedFaceOperators, state: RetainedSta
     return assemble_global_residual(
         operators, total, state.tpsa.bc_values, np.zeros_like(state.tpsa.bc_values),
         state.side_traction, body_force_increment=state.body_force,
+        neumann_increment=state.neumann_values,
     )

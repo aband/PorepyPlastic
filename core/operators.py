@@ -342,9 +342,17 @@ class RetainedFaceOperators:
     def elastic_one_sided_traction(
             self,
             z: FloatArray,
-            dirichlet_increment: FloatArray
+            dirichlet_increment: FloatArray,
+            *,
+            face_increment: FloatArray | None=None,
     )->FloatArray:
-        """Return outward integrated traction increments for at each loading."""
+        """
+        Return outward integrated traction increments for at each loading.
+
+        If face_increment is supplied, face_increment must be the unmodified output of
+        face_displacement_increment(z, dirichlet_increment) for this candidate.
+        It is reused without revalidation.
+        """
 
         stiffness = self.side_stiffness
         transfer  = self.rotation_transfer
@@ -354,10 +362,13 @@ class RetainedFaceOperators:
                 "Supply my when constructing operators ot evaluate traction."
             )
 
-        face_increment = self.face_displacement_increment(
-            z,
-            dirichlet_increment
-        )
+        # Compute face increment if not passed in
+        if face_increment is None:
+            face_increment = self.face_displacement_increment(
+                z,
+                dirichlet_increment
+            )
+
         values = np.asarray(z, dtype=np.float64)
 
         nd, nc = self.layout.dim, self.layout.num_cells

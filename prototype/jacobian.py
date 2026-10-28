@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
-import scipy.sparse as sps  # type: ignore[import-untyped]
+import scipy.sparse as sps
 from numpy.typing import NDArray
 
-from utils.reconstruction import MANDEL_BASIS
+from utils.reconstruction import mandel_basis
 from material.tangent import _validate_step, analytical_material_tangent, finite_difference_material_tangent
 from utils.state import TpsaState
 from material.material_state import MaterialPoint, MaterialState
@@ -20,13 +20,13 @@ class RetainedAnalyticalJacobian:
     """Equation (28) of Plasticity_revised.pdf: K = L + P D_Q B.
 
     All matrices use z = [delta_u,delta_r,delta_p,d_free]. B maps z variations
-    to cell-major Mandel strain [xx,yy,sqrt(2)*xy], with no prescribed-face or
+    to cell-major Mandel strain (three components in 2D, six in 3D), with no prescribed-face or
     cell-field variations in that reconstruction. D_Q = blockdiag(C_e-C_alg)
-    uses the existing 3D return-map tangent restricted to plane strain.
+    uses the existing 3D return-map tangent restricted to plane strain in 2D.
 
     L is the fixed elastic residual derivative. P maps cell Mandel Q to the
     global residual; cellwise constant Q cancels in cell momentum, and does not
-    enter the auxiliary rows. Only interior face-balance rows receive P D_Q B.
+    enter the auxiliary rows. Free-face rows (interior and Neumann) receive P D_Q B.
     T and P_side map z and Mandel Q to outward integrated one-sided tractions.
     face_jacobian includes boundary reaction derivatives as well as both sides
     of interior faces, with component-interleaved rows in operators.side order.
@@ -58,6 +58,7 @@ class RetainedAnalyticalJacobian:
         operators.reconstruct_strain(np.zeros(operators.num_dofs), committed.bc_values,
                                      committed.bc_values, committed.epsilon)
         self._operators = operators
+        self._basis = mandel_basis(operators.dim)
         self._points = tuple(material_points)
         self._committed = committed.copy()
         self._assemble_fixed_maps()
@@ -66,48 +67,51 @@ class RetainedAnalyticalJacobian:
         """Differentiate the one-sided laws and balance equations directly."""
         ops = self._operators
         nc, ns, nz = ops.num_cells, ops.num_sides, ops.num_dofs
+        nd, nr, m = ops.dim, ops.rotation_dim, len(self._basis)
         stiffness, transfer = ops.side_stiffness, ops.rotation_transfer
         ar, ap = ops.rotation_accumulation, ops.pressure_accumulation
         if stiffness is None or transfer is None or ar is None or ap is None:
             raise ValueError("Retained-face Jacobians require traction and accumulation coefficients.")
-        B = sps.lil_array((3 * nc, nz))
-        T = sps.lil_array((2 * ns, nz))
-        P_side = sps.lil_array((2 * ns, 3 * nc))
-        sums = sps.lil_array((nz, 2 * ns))
+        B = sps.lil_array((m * nc, nz))
+        T = sps.lil_array((nd * ns, nz))
+        P_side = sps.lil_array((nd * ns, m * nc))
+        sums = sps.lil_array((nz, nd * ns))
         auxiliary = sps.lil_array((nz, nz))
         weights = transfer.weights
-        identity = np.eye(2)
+        identity = np.eye(nd)
         for side, (face, cell) in enumerate(zip(ops.side_faces, ops.side_cells, strict=True)):
             area, normal = ops.side_areas[side], ops.side_normals[:, side]
-            side_rows = slice(2 * side, 2 * side + 2)
-            cell_rows = slice(2 * cell, 2 * cell + 2)
-            strain_rows = slice(3 * cell, 3 * cell + 3)
+            side_rows = slice(nd * side, nd * (side + 1))
+            cell_rows = slice(nd * cell, nd * (cell + 1))
+            strain_rows = slice(m * cell, m * (cell + 1))
             # N maps Mandel Q to Q*n; N.T maps d to Mandel sym(d outer n).
-            N = np.einsum("aij,j->ia", MANDEL_BASIS, normal)
+            N = np.einsum("aij,j->ia", self._basis, normal)
             T[side_rows, cell_rows] = -area * stiffness[side] * identity
-            T[side_rows, 3 * nc + cell] = (area * normal)[:, None]
+            T[side_rows, ops.p_slice.start + cell] = (area * normal)[:, None]
             start, end = weights.indptr[face:face + 2]
             for neighbor, weight in zip(weights.indices[start:end], weights.data[start:end], strict=True):
-                T[side_rows, 2 * nc + neighbor] = (area * weight * np.array([-normal[1], normal[0]]))[:, None]
+                rotation_cols = slice(ops.r_slice.start + nr * neighbor, ops.r_slice.start + nr * (neighbor + 1))
+                T[side_rows, rotation_cols] = area * weight * ops.rotation_matrix(normal)
             P_side[side_rows, strain_rows] = -area * N
             sums[cell_rows, side_rows] = identity
             first_dof = ops.face_dofs[0, face]
             if first_dof >= 0:
-                face_cols = slice(first_dof, first_dof + 2)
+                face_cols = slice(first_dof, first_dof + nd)
                 T[side_rows, face_cols] = area * stiffness[side] * identity
                 B[strain_rows, face_cols] = (area / ops.grid.cell_volumes[cell]) * N.T
-                auxiliary[2 * nc + cell, face_cols] = (area * np.array([normal[1], -normal[0]]))[None, :]
-                auxiliary[3 * nc + cell, face_cols] = (area * normal)[None, :]
+                rotation_rows = slice(ops.r_slice.start + nr * cell, ops.r_slice.start + nr * (cell + 1))
+                auxiliary[rotation_rows, face_cols] = -area * ops.rotation_matrix(normal).T
+                auxiliary[ops.p_slice.start + cell, face_cols] = (area * normal)[None, :]
                 sums[face_cols, side_rows] = identity
-        auxiliary.setdiag(np.r_[np.zeros(2 * nc), -ar, -ap, np.zeros(2 * ops.num_free_faces)])
-        sums = sums.tocsr()
+        auxiliary.setdiag(np.r_[np.zeros(nd * nc), -np.repeat(ar, nr), -ap, np.zeros(nd * ops.num_free_faces)])
+        balance = sums.tocsr()
         self.B, self.T, self.P_side = B.tocsr(), T.tocsr(), P_side.tocsr()
-        self.L = sps.csr_array(sums @ self.T + auxiliary.tocsr())
+        self.L = sps.csr_array(balance @ self.T + auxiliary.tocsr())
         # Express exact closed-cell cancellation rather than leaving roundoff
         # entries in the three cell blocks of the plastic correction map.
-        self.P = sps.csr_array(sps.vstack((
-            sps.csr_array((4 * nc, 3 * nc)), (sums @ self.P_side)[4 * nc:],
-        ), format="csr"))
+        self.P = sps.csr_array(sps.vstack([
+            sps.csr_array((ops.cell_size, m * nc)), sps.csr_array(balance @ self.P_side)[ops.cell_size:],
+        ], format="csr"))
         for matrix in (self.B, self.T, self.P_side, self.L, self.P):
             matrix.eliminate_zeros()
             if not np.all(np.isfinite(matrix.data)):
@@ -117,11 +121,12 @@ class RetainedAnalyticalJacobian:
         self, point: MaterialPoint, committed: MaterialState,
         increment: NDArray[np.float64], returned: MaterialState,
     ) -> NDArray[np.float64]:
-        return analytical_material_tangent(point, committed, increment, returned=returned)
+        return analytical_material_tangent(point, committed, increment, dim=self._operators.dim, returned=returned)
 
     def plastic_tangent(self, z: NDArray[np.float64], evaluation: RetainedFaceResidual) -> sps.csr_array:
-        """Return D_Q = dQ_M/d epsilon_M as independent 3-by-3 cell blocks."""
+        """Return D_Q = dQ_M/d epsilon_M as independent 3-by-3 (2D) or 6-by-6 (3D) cell blocks."""
         ops, material = self._operators, evaluation.material_trial
+        nd = ops.dim
         ops._validate_unknowns(z)
         if not np.array_equal(z, evaluation.z):
             raise ValueError("Jacobian requires a candidate z matching the residual evaluation.")
@@ -139,8 +144,8 @@ class RetainedAnalyticalJacobian:
                 material.epsilon[:, :, cell] - self._committed.epsilon[:, :, cell],
                 material.material_states[cell],
             )
-            elastic = point.material.elastic_tensor.to_numpy(copy=False)[:2, :2, :2, :2]
-            blocks.append(np.einsum("aij,ijkl,bkl->ab", MANDEL_BASIS, elastic - tangent[:2, :2], MANDEL_BASIS))
+            elastic = point.material.elastic_tensor.to_numpy(copy=False)[:nd, :nd, :nd, :nd]
+            blocks.append(np.einsum("aij,ijkl,bkl->ab", self._basis, elastic - tangent[:nd, :nd], self._basis))
         derivative = sps.csr_array(sps.block_diag(blocks, format="csr"))
         derivative.eliminate_zeros()
         if not np.all(np.isfinite(derivative.data)):
@@ -148,7 +153,7 @@ class RetainedAnalyticalJacobian:
         return derivative
 
     def face_jacobian(self, z: NDArray[np.float64], evaluation: RetainedFaceResidual) -> sps.csr_array:
-        """d delta_t/dz for ALL one-sided tractions, shape (2*num_sides,num_dofs)."""
+        """d delta_t/dz for ALL one-sided tractions, shape (dim*num_sides,num_dofs)."""
         matrix = sps.csr_array(self.T + self.P_side @ self.plastic_tangent(z, evaluation) @ self.B)
         matrix.eliminate_zeros()
         if not np.all(np.isfinite(matrix.data)):
@@ -184,4 +189,4 @@ class RetainedFiniteDifferenceJacobian(RetainedAnalyticalJacobian):
         self, point: MaterialPoint, committed: MaterialState,
         increment: NDArray[np.float64], returned: MaterialState,
     ) -> NDArray[np.float64]:
-        return finite_difference_material_tangent(point, committed, increment, step=self.step)
+        return finite_difference_material_tangent(point, committed, increment, dim=self._operators.dim, step=self.step)

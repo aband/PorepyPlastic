@@ -113,10 +113,13 @@ class ResidualAssembler:
         values = np.asarray(z, dtype=np.float64)
 
         face_increment = self.operators.face_displacement_increment(
-            values, loads.dirichlet_increment
+            values, 
+            loads.dirichlet_increment,
         )
         traction_increment = self.operators.elastic_one_sided_traction(
-            values, loads.dirichlet_increment
+            values, 
+            loads.dirichlet_increment,
+            face_increment=face_increment,
         )
 
         residual = self.assemble(
@@ -329,6 +332,7 @@ class ResidualAssembler:
 
         return result
 
+    # Code used to check against TPSA for consistency.
     # def _validate_setup(self) -> None:
         # """Check shared grid, boundary partition, mu, and initialized coefficients."""
         # operators = self.operators
@@ -543,6 +547,7 @@ class ResidualAssembler:
         elastic_traction = self.operators.elastic_one_sided_traction(
             values,
             loads.dirichlet_increment,
+            face_increment=face_increment,
         )
 
         # Apply the correction from this same material trial

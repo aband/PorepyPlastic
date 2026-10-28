@@ -71,3 +71,120 @@ class MaterialHistory:
         return MaterialHistory(
             self.dim, self.epsilon, self.material_states
         )
+
+@dataclass(eq=False)
+class SolutionState:
+    """Owned snapshot of the accepted total solution.
+
+    Face and side ordering must match the residual assembler.
+    Keep this state unchanged during Newton iterations.
+    """
+
+    # Total cell unknowns [u, r, p].
+    x: FloatArray                       # (layout.cell_size,)
+
+    # Total displacement on ALL faces, including Dirichlet faces.
+    face_displacement: FloatArray       # (dim, num_faces)
+
+    # Total outward INTEGRATED traction for each cell-face side.
+    side_traction: FloatArray           # (dim, num_sides)
+
+    # Total strain and committed constitutive states.
+    material: MaterialHistory
+
+    # Accepted outward INTEGRATED Neumann tractions.
+    # Columns follow assembler.neumann_faces.
+    neumann_values: FloatArray          # (dim, num_neumann_faces)
+
+    # Accepted integrated sources [b_u, b_r, b_p].
+    cell_source: FloatArray             # (layout.cell_size,)
+
+    def __post_init__(self) -> None:
+        """Own the supplied arrays and material history."""
+        for name in (
+            "x",
+            "face_displacement",
+            "side_traction",
+            "neumann_values",
+            "cell_source",
+        ):
+            values = np.asarray(getattr(self, name))
+
+            if values.dtype.kind not in ("f", "i", "u"):
+                raise ValueError(f"{name} must contain real numeric values.")
+
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{name} must contain finite values.")
+
+            setattr(
+                self,
+                name,
+                np.array(values, dtype=np.float64, copy=True),
+            )
+
+        self.material = self.material.copy()
+
+    @classmethod
+    def zeros(
+        cls,
+        layout: DofLayout,
+        *,
+        num_sides: int,
+        num_neumann_faces: int,
+    ) -> SolutionState:
+        """Undeformed, unstressed state with zero applied loads."""
+        return cls(
+            x=np.zeros(layout.cell_size),
+            face_displacement=np.zeros(
+                (layout.dim, layout.num_faces)
+            ),
+            side_traction=np.zeros((layout.dim, num_sides)),
+            material=MaterialHistory.zeros(layout),
+            neumann_values=np.zeros(
+                (layout.dim, num_neumann_faces)
+            ),
+            cell_source=np.zeros(layout.cell_size),
+        )
+
+    def copy(self) -> SolutionState:
+        """Return an independent solution snapshot."""
+        return SolutionState(
+            x=self.x,
+            face_displacement=self.face_displacement,
+            side_traction=self.side_traction,
+            material=self.material,
+            neumann_values=self.neumann_values,
+            cell_source=self.cell_source,
+        )
+
+@dataclass(eq=False)
+class LoadStepResult:
+    load_factor: float
+    state: SolutionState
+    newton: NewtonResult
+
+
+class LoadStepController(_LoadStepSchedule[LoadStepResult]):
+    def __init__(
+        self,
+        assembler: ResidualAssembler,
+        committed: SolutionState,
+        reference_dirichlet: FloatArray,
+        *,
+        reference_neumann: FloatArray | None = None,
+        reference_cell_source: FloatArray | None = None,
+        initial_load_factor: float = 0.0,
+        max_iterations: int = 20,
+        atol: BlockTolerances = (1e-5, 1e-12, 1e-12, 1e-5),
+        rtol: BlockTolerances = (1e-8, 1e-8, 1e-8, 1e-8),
+    ) -> None:
+        # Validate and copy inputs.
+        # Store one assembler and one AnalyticalJacobian.
+        # Initialize accepted state, factor, records and attempts.
+        ...
+
+    def _validate_state(self, state: SolutionState) -> None:
+        ...
+
+    def advance(self, load_factor: float) -> LoadStepResult:
+        ...

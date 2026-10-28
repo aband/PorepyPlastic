@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import numpy as np
-import scipy.sparse as sps  # type: ignore[import-untyped]
+import scipy.sparse as sps
 from numpy.typing import NDArray
 from porepy.grids.grid import Grid
-from porepy.grids.structured import TensorGrid
 from porepy.params.bc import BoundaryConditionVectorial
 
-from utils.reconstruction import _validate_reconstruction_inputs, gradient_green_gauss, plane_strain_from_gradient
+from utils.reconstruction import validate_reconstruction_geometry, gradient_green_gauss, strain_from_gradient
 from utils.transfer import CellToFaceTransfer
 
 
 class RetainedFaceOperators:
-    """Index independent cell/face increments on a full-Dirichlet 2D tensor grid.
+    """Index cell/face increments on a 2D/3D grid with Dirichlet/Neumann boundaries.
 
-    z = [delta_u(2*nc), delta_r(nc), delta_p(nc), d_free(2*n_free)]. Vector
+    z = [delta_u(nd*nc), delta_r(nr*nc), delta_p(nc), d_free(nd*n_free)],
+    with nr=1 in 2D and nr=3 in 3D. Vector
     components are interleaved by cell/face, as in PorePy (order="F"). The
-    free faces are the interior faces, sorted by PorePy face number. Prescribed
+    free faces are the interior and Neumann faces, sorted by PorePy face number. Prescribed
     boundary faces have no Newton DOFs; their increments are target minus old
     boundary displacement. All entries in z are increments from the committed
     load step, not absolute fields or corrections from the previous iteration.
@@ -33,9 +33,11 @@ class RetainedFaceOperators:
 
     Side arrays enumerate cell-face pairs in increasing face order, then cell
     order within each face. side_faces and side_cells map the last axis of a
-    (2,num_sides) traction array. side_normals are outward UNIT normals;
+    (dim,num_sides) traction array. side_normals are outward UNIT normals;
     side_areas supplies the face measure exactly once. Traction coefficients
-    require orthogonal cell-to-face offsets; rotated rectangular grids are valid.
+    require orthogonal cell-to-face offsets; rotated rectangular grids and
+    Cartesian subgrids are valid. Admissibility is checked from geometry, rather
+    than requiring a TensorGrid class (PorePy subgrid extraction returns Grid).
 
     Supply computed geometry and the existing BoundaryConditionVectorial, e.g.
     RetainedFaceOperators(case.grid, case.bc) after case.prepare_simulation().
@@ -51,16 +53,22 @@ class RetainedFaceOperators:
         lam: float | NDArray[np.float64] | None = None,
     ) -> None:
         nc, nf = grid.num_cells, grid.num_faces
-        _validate_reconstruction_inputs(grid, np.zeros((2, nc)), np.zeros((2, nf)))
-        if not isinstance(grid, TensorGrid):
-            raise ValueError("Retained-face kinematics currently requires a tensor-product grid.")
-        if not np.allclose(grid.nodes[2], 0.0, rtol=0, atol=1e-12):
+        validate_reconstruction_geometry(grid)
+        nd = grid.dim
+        nr = 1 if nd == 2 else 3
+        if nd == 2 and not np.allclose(grid.nodes[2], 0.0, rtol=0, atol=1e-12):
             raise ValueError("Retained-face plane strain requires a grid in the xy plane.")
         boundary = np.asarray(grid.get_all_boundary_faces(), dtype=np.int64)
-        if bc.is_dir.shape != (2, nf) or not np.all(bc.is_dir[:, boundary]):
-            raise ValueError("Retained-face kinematics requires Dirichlet data on every boundary face.")
-
-        free = np.setdiff1d(np.arange(nf, dtype=np.int64), boundary)
+        if bc.dim != nd or bc.is_dir.shape != (nd, nf):
+            raise ValueError("Boundary conditions must match the grid dimension and faces.")
+        is_dir = np.all(bc.is_dir[:, boundary] & ~bc.is_neu[:, boundary], axis=0)
+        is_neu = np.all(bc.is_neu[:, boundary] & ~bc.is_dir[:, boundary], axis=0)
+        if np.any(bc.is_rob[:, boundary]) or not np.all(is_dir | is_neu):
+            raise ValueError("Expected full-vector Dirichlet or Neumann boundary conditions.")
+        dirichlet = np.sort(boundary[is_dir])
+        neumann = np.sort(boundary[is_neu])
+        interior = np.setdiff1d(np.arange(nf, dtype=np.int64), boundary)
+        free = np.setdiff1d(np.arange(nf, dtype=np.int64), dirichlet)
         incidence = sps.csr_array(grid.cell_faces, copy=True)
         incidence.sum_duplicates()
         incidence.eliminate_zeros()
@@ -68,26 +76,31 @@ class RetainedFaceOperators:
         if incidence.shape != (nf, nc):
             raise ValueError("Face-cell connectivity must match the grid.")
         neighbors = np.diff(incidence.indptr)
-        if (not np.all(neighbors[boundary] == 1) or not np.all(neighbors[free] == 2)
+        if (not np.all(neighbors[boundary] == 1) or not np.all(neighbors[interior] == 2)
                 or not np.all(np.isin(incidence.data, [-1, 1]))
-                or not np.all(np.asarray(incidence.sum(axis=1)).ravel()[free] == 0)):
+                or not np.all(np.asarray(incidence.sum(axis=1)).ravel()[interior] == 0)):
             raise ValueError("Expected one boundary neighbor and two oppositely oriented interior neighbors.")
 
         self.grid = grid
+        self.dim, self.rotation_dim = nd, nr
+        self.cell_size = (nd + nr + 1) * nc
         self.num_cells, self.num_faces = nc, nf
         self.boundary_faces = boundary.copy()
+        self.dirichlet_faces = dirichlet
+        self.neumann_faces = neumann
+        self.neumann_positions = np.searchsorted(free, neumann)
         self.free_faces = free
         self.num_free_faces = free.size
-        self.num_dofs = 4 * nc + 2 * self.num_free_faces
-        self.u_slice = slice(0, 2 * nc)
-        self.r_slice = slice(2 * nc, 3 * nc)
-        self.p_slice = slice(3 * nc, 4 * nc)
-        self.cell_slice = slice(0, 4 * nc)
-        self.face_slice = slice(4 * nc, self.num_dofs)
+        self.num_dofs = self.cell_size + nd * self.num_free_faces
+        self.u_slice = slice(0, nd * nc)
+        self.r_slice = slice(nd * nc, (nd + nr) * nc)
+        self.p_slice = slice((nd + nr) * nc, self.cell_size)
+        self.cell_slice = slice(0, self.cell_size)
+        self.face_slice = slice(self.cell_size, self.num_dofs)
         # face_dofs[component, face] is its global z index, or -1 if prescribed.
-        self.face_dofs = np.full((2, nf), -1, dtype=np.int64)
-        self.face_dofs[:, free] = np.arange(4 * nc, self.num_dofs, dtype=np.int64).reshape(
-            (2, self.num_free_faces), order="F",
+        self.face_dofs = np.full((nd, nf), -1, dtype=np.int64)
+        self.face_dofs[:, free] = np.arange(self.cell_size, self.num_dofs, dtype=np.int64).reshape(
+            (self.dim, self.num_free_faces), order="F",
         )
 
         self.side_faces = np.repeat(np.arange(nf, dtype=np.int64), neighbors)
@@ -95,10 +108,10 @@ class RetainedFaceOperators:
         self.side_signs = np.array(incidence.data, dtype=np.float64, copy=True)
         self.num_sides = self.side_faces.size
         self.side_areas = grid.face_areas[self.side_faces].copy()
-        self.side_normals = grid.face_normals[:2, self.side_faces] * self.side_signs / self.side_areas
+        self.side_normals = grid.face_normals[:nd, self.side_faces] * self.side_signs / self.side_areas
         if not np.allclose(np.linalg.norm(self.side_normals, axis=0), 1.0, rtol=1e-12, atol=1e-12):
             raise ValueError("Face normals must have magnitude equal to the face areas.")
-        offsets = grid.face_centers[:2, self.side_faces] - grid.cell_centers[:2, self.side_cells]
+        offsets = grid.face_centers[:nd, self.side_faces] - grid.cell_centers[:nd, self.side_cells]
         self.side_distances = np.sum(offsets * self.side_normals, axis=0)
         if not np.all(np.isfinite(self.side_distances)) or np.any(self.side_distances <= 0):
             raise ValueError("Expected positive outward cell-to-face distances.")
@@ -118,6 +131,13 @@ class RetainedFaceOperators:
                 raise ValueError("Supply mu together with lam for global residual assembly.")
             self.lam = self._cell_coefficient("lam", lam)
             self.pressure_accumulation = self._cell_accumulation(self.lam)
+
+    def rotation_matrix(self, normal: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Map rotation stress to r cross n; auxiliary flux uses -R.T @ d."""
+        if self.dim == 2:
+            return np.array([[-normal[1]], [normal[0]]])
+        nx, ny, nz = normal
+        return np.array([[0.0, nz, -ny], [-nz, 0.0, nx], [ny, -nx, 0.0]])
 
     def _cell_coefficient(
         self, name: str, value: float | NDArray[np.float64],
@@ -164,35 +184,35 @@ class RetainedFaceOperators:
     def pack(
         self, cell_increment: NDArray[np.float64], free_face_increment: NDArray[np.float64],
     ) -> NDArray[np.float64]:
-        """Pack [delta_u,delta_r,delta_p] (4*nc,) and d_free (2,n_free)."""
-        if cell_increment.shape != (4 * self.num_cells,) or not np.all(np.isfinite(cell_increment)):
-            raise ValueError(f"Expected finite cell_increment with shape ({4 * self.num_cells},).")
-        if free_face_increment.shape != (2, self.num_free_faces) or not np.all(np.isfinite(free_face_increment)):
-            raise ValueError(f"Expected finite free_face_increment with shape (2, {self.num_free_faces}).")
+        """Pack [delta_u,delta_r,delta_p] (cell_size,) and d_free (dim,n_free)."""
+        if cell_increment.shape != (self.cell_size,) or not np.all(np.isfinite(cell_increment)):
+            raise ValueError(f"Expected finite cell_increment with shape ({self.cell_size},).")
+        if free_face_increment.shape != (self.dim, self.num_free_faces) or not np.all(np.isfinite(free_face_increment)):
+            raise ValueError(f"Expected finite free_face_increment with shape ({self.dim}, {self.num_free_faces}).")
         return np.concatenate((cell_increment, free_face_increment.ravel(order="F")))
 
     def unpack(self, z: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """Return owned cell increments (4*nc,) and free-face increments (2,n_free)."""
+        """Return owned cell increments (cell_size,) and free-face increments (dim,n_free)."""
         self._validate_unknowns(z)
         return (z[self.cell_slice].copy(),
-                z[self.face_slice].reshape((2, self.num_free_faces), order="F").copy())
+                z[self.face_slice].reshape((self.dim, self.num_free_faces), order="F").copy())
 
     def face_displacement_increment(
         self, z: NDArray[np.float64], bc_values: NDArray[np.float64],
         committed_bc_values: NDArray[np.float64],
     ) -> NDArray[np.float64]:
-        """Form d (2,nf), inserting target-minus-committed Dirichlet values.
+        """Form d (dim,nf), inserting target-minus-committed Dirichlet values.
 
-        Both boundary arrays have shape (2,nf) and hold absolute displacements.
+        Both boundary arrays have shape (dim,nf) and hold absolute displacements.
         Only their boundary entries are used; unused interior entries may be NaN.
         """
         self._validate_unknowns(z)
-        bf = self.boundary_faces
+        bf = self.dirichlet_faces
         for name, values in (("bc_values", bc_values), ("committed_bc_values", committed_bc_values)):
-            if values.shape != (2, self.num_faces) or not np.all(np.isfinite(values[:, bf])):
-                raise ValueError(f"Expected {name} (2, {self.num_faces}), finite on boundary faces.")
-        d = np.zeros((2, self.num_faces))
-        d[:, self.free_faces] = z[self.face_slice].reshape((2, self.num_free_faces), order="F")
+            if values.shape != (self.dim, self.num_faces) or not np.all(np.isfinite(values[:, bf])):
+                raise ValueError(f"Expected {name} ({self.dim}, {self.num_faces}), finite on boundary faces.")
+        d = np.zeros((self.dim, self.num_faces))
+        d[:, self.free_faces] = z[self.face_slice].reshape((self.dim, self.num_free_faces), order="F")
         with np.errstate(over="ignore", invalid="ignore"):
             d[:, bf] = bc_values[:, bf] - committed_bc_values[:, bf]
         if not np.all(np.isfinite(d)):
@@ -205,7 +225,7 @@ class RetainedFaceOperators:
     ) -> NDArray[np.float64]:
         """Reconstruct delta_epsilon (3,3,nc) with the existing Green–Gauss helpers."""
         d = self.face_displacement_increment(z, bc_values, committed_bc_values)
-        return plane_strain_from_gradient(gradient_green_gauss(self.grid, d))
+        return strain_from_gradient(gradient_green_gauss(self.grid, d))
 
     def reconstruct_strain(
         self, z: NDArray[np.float64], bc_values: NDArray[np.float64],
@@ -213,15 +233,16 @@ class RetainedFaceOperators:
     ) -> NDArray[np.float64]:
         """Return total strain epsilon_n + delta_epsilon, preserving fixed history.
 
-        committed_epsilon is the previous total plane strain, including elastic
-        and plastic contributions. Tensor shear is used; zz, xz, yz are zero.
+        committed_epsilon is the previous total strain, including elastic and plastic
+        contributions. Tensor shear is used; 2D imposes plane strain.
         """
         if (committed_epsilon.shape != (3, 3, self.num_cells)
                 or not np.all(np.isfinite(committed_epsilon))
                 or not np.allclose(committed_epsilon, committed_epsilon.swapaxes(0, 1), rtol=1e-10, atol=1e-14)
-                or not np.allclose(committed_epsilon[2], 0, atol=1e-14)
-                or not np.allclose(committed_epsilon[:, 2], 0, atol=1e-14)):
-            raise ValueError("Expected finite symmetric committed total plane strain with shape (3, 3, nc).")
+                or (self.dim == 2 and (
+                    not np.allclose(committed_epsilon[2], 0, atol=1e-14)
+                    or not np.allclose(committed_epsilon[:, 2], 0, atol=1e-14)))):
+            raise ValueError("Expected finite symmetric committed total strain with shape (3, 3, nc).")
         increment = self.strain_increment(z, bc_values, committed_bc_values)
         with np.errstate(over="ignore", invalid="ignore"):
             total = committed_epsilon + increment

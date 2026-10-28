@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from utils.load_schedule import LoadAttempt, LoadStepError, _LoadStepSchedule
 from utils.newton_utils import NewtonConvergenceError, _residual_block_norms, _validate_newton_options
 from utils.state import TpsaState
+from prototype.tpsa_state import TpsaState as SpatialTpsaState
 from material.material_state import MaterialPoint
 from prototype.newton import (
     BacktrackingOptions, BlockTolerances, JacobianCallback, RetainedNewtonResult, solve_newton,
@@ -37,10 +38,13 @@ class RetainedLoadStepResult:
 
 
 class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
-    """Proportional full-Dirichlet loads with fixed or adaptive stepping.
+    """Proportional Dirichlet, Neumann and body loads with fixed or adaptive stepping.
 
     Targets are g=factor*reference_bc_values and b=factor*reference_body_force.
-    Newton receives absolute g but INCREMENTAL b_target-b_n, together with the
+    Newton receives absolute g but INCREMENTAL b_target-b_n.
+    Neumann reference values are outward integrated forces (dim, n_neumann),
+    supplied in operators.neumann_faces order. They are differenced against
+    the accepted state at each attempt. Newton also receives the
     actual old imbalance assembled from stored total histories. A fresh callback
     uses H_n at every attempt, including adaptive retries. The default is the
     analytical retained-face Jacobian; jacobian_factory(old_tpsa) can override it.
@@ -61,6 +65,7 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
         self, operators: RetainedFaceOperators, material_points: Sequence[MaterialPoint],
         committed: RetainedState, reference_bc_values: NDArray[np.float64],
         *, reference_body_force: NDArray[np.float64] | None = None,
+        reference_neumann: NDArray[np.float64] | None = None,
         initial_load_factor: float = 0.0,
         jacobian_factory: JacobianFactory | None = None,
         max_iterations: int = 20,
@@ -68,8 +73,9 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
         rtol: BlockTolerances = (1e-8, 1e-8, 1e-8, 1e-8),
         line_search: BacktrackingOptions | None = None,
     ) -> None:
-        nc, nf = operators.num_cells, operators.num_faces
-        state = RetainedState(operators, committed.tpsa, committed.side_traction, committed.body_force)
+        nc, nf, nd = operators.num_cells, operators.num_faces, operators.dim
+        state = RetainedState(operators, committed.tpsa, committed.side_traction, committed.body_force,
+                              neumann_values=committed.neumann_values)
         if operators.mu is None or operators.lam is None:
             raise ValueError("Retained load stepping requires mu and lam.")
         if len(material_points) != nc:
@@ -84,16 +90,20 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
         if line_search is not None and not isinstance(line_search, BacktrackingOptions):
             raise ValueError("line_search must be BacktrackingOptions or None.")
         values = np.asarray(reference_bc_values, dtype=np.float64)
-        bf = operators.boundary_faces
-        if values.shape != (2, nf) or not np.all(np.isfinite(values[:, bf])):
-            raise ValueError(f"Expected reference_bc_values (2, {nf}), finite on boundary faces.")
-        boundary = np.zeros((2, nf))
+        bf = operators.dirichlet_faces
+        if values.shape != (nd, nf) or not np.all(np.isfinite(values[:, bf])):
+            raise ValueError(f"Expected reference_bc_values ({nd}, {nf}), finite on boundary faces.")
+        boundary = np.zeros((nd, nf))
         boundary[:, bf] = values[:, bf]
-        body = np.zeros((2, nc)) if reference_body_force is None else np.array(
+        body = np.zeros((nd, nc)) if reference_body_force is None else np.array(
             reference_body_force, dtype=np.float64, copy=True,
         )
-        if body.shape != (2, nc) or not np.all(np.isfinite(body)):
-            raise ValueError(f"Expected finite reference_body_force with shape (2, {nc}).")
+        if body.shape != (nd, nc) or not np.all(np.isfinite(body)):
+            raise ValueError(f"Expected finite reference_body_force with shape ({nd}, {nc}).")
+        neumann = (np.zeros((nd, operators.neumann_faces.size)) if reference_neumann is None
+                   else np.array(reference_neumann, dtype=np.float64, copy=True))
+        if neumann.shape != (nd, operators.neumann_faces.size) or not np.all(np.isfinite(neumann)):
+            raise ValueError("Expected finite reference_neumann (dim, num_neumann_faces).")
         if not np.isfinite(initial_load_factor):
             raise ValueError("initial_load_factor must be finite.")
         with np.errstate(over="raise", invalid="raise"):
@@ -102,6 +112,9 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
             raise ValueError("Committed boundary data must match initial_load_factor times reference data.")
         if not np.allclose(state.body_force, initial_body, rtol=1e-10, atol=1e-14):
             raise ValueError("Committed body force must match initial_load_factor times reference data.")
+        if not np.allclose(state.neumann_values, initial_load_factor * neumann, rtol=1e-10, atol=1e-14):
+            raise ValueError("Committed Neumann data must match initial_load_factor times reference data.")
+        self._neumann = neumann
         self._operators, self._points = operators, tuple(material_points)
         self._committed, self._boundary, self._body = state, boundary, body
         self._load_factor = float(initial_load_factor)
@@ -139,6 +152,8 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
             with np.errstate(over="raise", invalid="raise"):
                 boundary, body = factor * self._boundary, factor * self._body
                 delta_body = body - old.body_force
+                neumann = factor * self._neumann
+                delta_neumann = neumann - old.neumann_values
             imbalance = assemble_state_residual(ops, old)
             callback = None if self._jacobian_factory is None else self._jacobian_factory(old.tpsa.copy())
             result = solve_newton(
@@ -146,6 +161,7 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
                 body_force_increment=delta_body, committed_residual=imbalance,
                 max_iterations=self._max_iterations, atol=self._atol, rtol=self._rtol,
                 line_search=self._line_search,
+                **({"neumann_increment": delta_neumann} if ops.neumann_faces.size else {}),
             )
             evaluation = result.evaluation
             assert old.tpsa.face_displacement is not None
@@ -155,11 +171,11 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
                     result.z, boundary, old.tpsa.bc_values,
                 )
                 side = old.side_traction + evaluation.traction_increment
-            faces[:, ops.boundary_faces] = boundary[:, ops.boundary_faces]
+            faces[:, ops.dirichlet_faces] = boundary[:, ops.dirichlet_faces]
             material = evaluation.material_trial
-            tpsa = TpsaState(x, boundary, material.epsilon, material.material_states,
+            tpsa = SpatialTpsaState(x, boundary, material.epsilon, material.material_states,
                              old.tpsa.traction, face_displacement=faces)
-            accepted = RetainedState(ops, tpsa, side, body)
+            accepted = RetainedState(ops, tpsa, side, body, neumann_values=neumann)
             norms = _residual_block_norms(assemble_state_residual(ops, accepted), ops.num_dofs,
                 (ops.u_slice, ops.r_slice, ops.p_slice, ops.face_slice))
             if np.any(norms > result.thresholds):

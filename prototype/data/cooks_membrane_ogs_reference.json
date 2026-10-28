@@ -1,0 +1,12 @@
+{
+  "source": "OpenGeoSys 6.5.7 Cook's membrane B-bar benchmark",
+  "source_url": "https://www.opengeosys.org/6.5.7/docs/benchmarks/small-deformations/cooksmembranebbar/",
+  "project_url": "https://raw.githubusercontent.com/ufz/ogs/6.5.7/Tests/Data/Mechanics/CooksMembrane/CooksMembrane.prj",
+  "geometry_url": "https://raw.githubusercontent.com/ufz/ogs/6.5.7/Tests/Data/Mechanics/CooksMembrane/boundary.gml",
+  "series_origin": "Published notebook reference arrays; converted from metres to millimetres. OGS was not rerun here.",
+  "elements_per_side": [4, 10, 15, 20, 25, 30],
+  "uy_bbar_mm": [6.957471385697900, 7.772616910217863, 7.897597955618913, 7.951479575082158, 7.976349858390623, 7.999718483861992],
+  "uy_non_bbar_mm": [2.164586784123102, 2.2603329644579383, 2.375295856067169, 2.519725590136146, 2.6515294133790837, 2.868289617025223],
+  "load_interpretation": "The project assigns F=6250e3 Pa on the 16 mm right edge: 6.25 MPa traction, 100 N/mm resultant per thickness, 100 N for 1 mm thickness.",
+  "model": "Small-strain isotropic linear elasticity, plane strain; E=240.565 MPa, nu=0.4999."
+}

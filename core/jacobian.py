@@ -21,6 +21,11 @@ class AnalyticalJacobian:
         nd = self.layout.dim
         self._mandel_basis = mandel_basis(nd)
 
+        m = self._mandel_basis.shape[0]
+        self._mandel_projection = self._mandel_basis.reshape(
+            m, nd * nd, order="C"
+        )
+
         # Elastic material parameters remain fixed during Newton iterations.
         self._elastic_mandel = tuple(
             np.einsum(
@@ -343,8 +348,11 @@ class AnalyticalJacobian:
             raise ValueError("Expected one committed and trial material state per cell.")
 
         increments = trial.epsilon - committed.epsilon
-        basis = self._mandel_basis
+        #basis = self._mandel_basis
         blocks: list[FloatArray] = []
+
+        M = self._mandel_projection
+        M_transpose = M.T
 
         for cell, point in enumerate(self.assembler.material_points):
             algorithmic = analytical_material_tangent(
@@ -356,12 +364,20 @@ class AnalyticalJacobian:
             )
 
             # Input strain indices already have size nd; select active stress rows.
-            algorithmic_mandel = np.einsum(
-                "aij,ijkl,bkl->ab",
-                basis,
-                algorithmic[:nd, :nd, :, :],
-                basis,
-                optimize=True,
+            #algorithmic_mandel = np.einsum(
+            #    "aij,ijkl,bkl->ab",
+            #    basis,
+            #    algorithmic[:nd, :nd, :, :],
+            #    basis,
+            #    optimize=True,
+            #)
+            # Reuse the computed mandel basis
+            active_tangent = algorithmic[:nd, :nd, :, :]
+
+            algorithmic_mandel = (
+                M
+                @ active_tangent.reshape(nd*nd, nd*nd, order="C")
+                @ M_transpose
             )
 
             blocks.append(

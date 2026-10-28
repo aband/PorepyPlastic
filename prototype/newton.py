@@ -77,6 +77,7 @@ def solve_newton(
     *,
     initial_z: NDArray[np.float64] | None = None,
     body_force_increment: NDArray[np.float64] | None = None,
+    neumann_increment: NDArray[np.float64] | None = None,
     committed_residual: NDArray[np.float64] | None = None,
     max_iterations: int = 20,
     atol: BlockTolerances = (1e-5, 1e-12, 1e-12, 1e-5),
@@ -91,7 +92,7 @@ def solve_newton(
     or independent material-iterate correction is performed. initial_z defaults
     to zero LOAD-STEP increments, even when the committed state is nonzero.
 
-    Boundary data is absolute; body_force_increment is integrated (2,nc) and
+    Boundary data is absolute; body_force_increment is integrated (dim,nc) and
     committed_residual is a known old imbalance (num_dofs,). These inputs and
     committed history are copied before iteration. Geometry and model parameters
     must stay fixed. A supplied jacobian(z, evaluation) uses the same history;
@@ -120,17 +121,18 @@ def solve_newton(
     absolute, relative = _validate_newton_options(max_iterations, atol, rtol, blocks=4)
     if line_search is not None and not isinstance(line_search, BacktrackingOptions):
         raise ValueError("line_search must be BacktrackingOptions or None.")
-    size, nf = operators.num_dofs, operators.num_faces
+    size, nf, nd = operators.num_dofs, operators.num_faces, operators.dim
     old, points = committed.copy(), tuple(material_points)
     z = np.zeros(size) if initial_z is None else np.array(initial_z, dtype=np.float64, copy=True)
     operators._validate_unknowns(z)
     values = np.asarray(bc_values, dtype=np.float64)
-    bf = operators.boundary_faces
-    if values.shape != (2, nf) or not np.all(np.isfinite(values[:, bf])):
-        raise ValueError(f"Expected bc_values (2, {nf}), finite on boundary faces.")
-    boundary = np.zeros((2, nf))
+    bf = operators.dirichlet_faces
+    if values.shape != (nd, nf) or not np.all(np.isfinite(values[:, bf])):
+        raise ValueError(f"Expected bc_values ({nd}, {nf}), finite on boundary faces.")
+    boundary = np.zeros((nd, nf))
     boundary[:, bf] = values[:, bf]
     body = None if body_force_increment is None else np.array(body_force_increment, dtype=np.float64, copy=True)
+    neumann = None if neumann_increment is None else np.array(neumann_increment, dtype=np.float64, copy=True)
     imbalance = None if committed_residual is None else np.array(committed_residual, dtype=np.float64, copy=True)
     blocks = (operators.u_slice, operators.r_slice, operators.p_slice, operators.face_slice)
     evaluations = 0
@@ -140,6 +142,7 @@ def solve_newton(
         result = evaluate_global_residual(
             operators, points, old, candidate, boundary,
             body_force_increment=body, committed_residual=imbalance,
+            **({"neumann_increment": neumann} if neumann is not None else {}),
         )
         evaluations += 1
         return result, _residual_block_norms(result.residual, size, blocks)
