@@ -9,6 +9,10 @@ Run from the repository root:
     python -m examples.benchmark_linear_solvers --case 2d:24 --solver direct --solver krylov
     python -m examples.benchmark_linear_solvers --case 3d:12 \\
         --solver krylov:preconditioner=ilu,petsc.pc_factor_levels=1 --json results/bench.json
+    python -m examples.benchmark_linear_solvers --case 2d:96 \\
+        --solver krylov:matrix_update=in_place,forcing=eisenstat-walker
+    python -m examples.benchmark_linear_solvers --case 3d:16 --controller predictor=elastic \\
+        --solver krylov:preconditioner=ilu,forcing=eisenstat-walker
 
 Cases are "<dim>d:<cells per axis>" on the unit square/cube with all faces
 Dirichlet and a fixed load path (loading, then partial unloading).
@@ -21,8 +25,8 @@ Solver specs are "<kind>[:key=value,...]":
                        and "petsc.<name>=<value>" goes into petsc_options.
 New KrylovOptions fields are accepted automatically.
 
---controller key=value is forwarded to LoadStepController (for example a
-future predictor=elastic option). Every run is compared with a reference run
+--controller key=value is forwarded to LoadStepController, e.g.
+predictor=elastic. Every run is compared with a reference run
 (by default the first solver), using the relative max-norm difference of the
 final x, face displacement and plastic strain.
 """

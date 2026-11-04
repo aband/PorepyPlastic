@@ -5,7 +5,7 @@ import porepy as pp
 import pytest
 import scipy.sparse as sps
 
-from core.condensation import CondensedElasticSystem
+from core.condensation import CondensedElasticSystem, FixedFacePattern
 from core.jacobian import AnalyticalJacobian
 from core.linear_solvers import CondensedDirectSolver, DirectSolver
 from core.loading import LoadStepController
@@ -291,3 +291,140 @@ def test_cell_row_guard_rejects_structural_errors(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(AnalyticalJacobian, "_build_stress_correction_matrix", broken)
     with pytest.raises(ValueError, match="cell rows"):
         AnalyticalJacobian(assembler)
+
+
+# ---------------------------------------------------------------- fixed face pattern
+def _simplex(dim: int) -> pp.Grid:
+    if dim == 2:
+        return pp.StructuredTriangleGrid(np.array([4, 4]), np.array([1.0, 1.0]))
+    return pp.StructuredTetrahedralGrid(np.array([2, 2, 2]), np.array([1.0, 1.0, 1.0]))
+
+
+PATTERN_CASES = {
+    **CASES,
+    # Simplex grids put plastic entries outside the S_el pattern too.
+    "2d-simplex": lambda: _assembler(_simplex(2)),
+    "3d-simplex": lambda: _assembler(_simplex(3)),
+}
+
+
+@pytest.fixture(params=list(PATTERN_CASES), ids=list(PATTERN_CASES))
+def pattern_assembler(request: pytest.FixtureRequest) -> ResidualAssembler:
+    return PATTERN_CASES[request.param]()
+
+
+def _pattern_keys(matrix: sps.csr_array) -> set[tuple[int, int]]:
+    coo = sps.coo_array(matrix)
+    return set(zip(coo.row.tolist(), coo.col.tolist(), strict=True))
+
+
+def _blocks(assembler: ResidualAssembler, cells: np.ndarray, seed: int = 4) -> np.ndarray:
+    m = 3 if assembler.layout.dim == 2 else 6
+    return np.random.default_rng(seed).normal(size=(cells.size, m, m))
+
+
+def test_fixed_values_equal_condensed_face_matrix(pattern_assembler: ResidualAssembler) -> None:
+    """S_el + P_f D_Q B_f from the scatter equals the sparse-product assembly."""
+    jacobian = AnalyticalJacobian(pattern_assembler)
+    old, evaluation = MaterialHistory.zeros(pattern_assembler.layout), _plastic_evaluation(pattern_assembler)
+    pattern = jacobian.fixed_face_pattern()
+    expected = jacobian.condensed_elastic().face_matrix(jacobian.plastic_face_block(old, evaluation))
+    actual = pattern.matrix(jacobian.fixed_face_values(old, evaluation))
+    assert _relative(actual.toarray(), expected.toarray()) < 1e-13
+
+
+def test_fixed_pattern_covers_elastic_and_all_plastic_cells(pattern_assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(pattern_assembler)
+    pattern = jacobian.fixed_face_pattern()
+    S_el = jacobian.condensed_elastic().S_elastic
+    cells = np.arange(pattern_assembler.layout.num_cells)
+    m = pattern.P_local.shape[2]
+    all_plastic = sps.csr_array(
+        jacobian.P_face @ sps.block_diag([np.ones((m, m))] * cells.size, format="csr") @ jacobian.B_face
+    )
+    keys = _pattern_keys(pattern.matrix(np.ones(pattern.nnz)))
+    assert _pattern_keys(S_el) <= keys
+    assert _pattern_keys(all_plastic) <= keys
+    assert keys == _pattern_keys(S_el) | _pattern_keys(all_plastic)   # no extra fill
+    # Generic random blocks on every cell also stay inside the pattern.
+    values = pattern.values(cells, _blocks(pattern_assembler, cells))
+    expected = S_el + jacobian.P_face @ sps.block_diag(list(_blocks(pattern_assembler, cells))) @ jacobian.B_face
+    assert _relative(pattern.matrix(values).toarray(), sps.csr_array(expected).toarray()) < 1e-13
+
+
+def test_fixed_values_without_plastic_cells_are_elastic(assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    m = pattern.P_local.shape[2]
+    values = pattern.values(np.zeros(0, dtype=np.int64), np.zeros((0, m, m)))
+    np.testing.assert_array_equal(
+        pattern.matrix(values).toarray(), jacobian.condensed_elastic().S_elastic.toarray(),
+    )
+    values[:] = 1.0                      # a copy: the cached elastic data is untouched
+    assert not np.all(pattern.elastic_data == 1.0)
+
+
+def test_one_plastic_cell_changes_only_its_face_dofs(assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    cell = np.array([assembler.layout.num_cells - 1])
+    change = pattern.matrix(pattern.values(cell, _blocks(assembler, cell)) - pattern.elastic_data)
+    m = pattern.P_local.shape[2]
+    rows = np.unique(jacobian.P_face[:, m * cell[0]: m * cell[0] + m].nonzero()[0])
+    cols = np.unique(jacobian.B_face[m * cell[0]: m * cell[0] + m].nonzero()[1])
+    changed_rows, changed_cols = change.nonzero()
+    assert changed_rows.size > 0
+    assert set(changed_rows.tolist()) <= set(rows.tolist())
+    assert set(changed_cols.tolist()) <= set(cols.tolist())
+
+
+def test_contributions_of_cells_sharing_faces_add(assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    cells = np.arange(assembler.layout.num_cells)
+    blocks = _blocks(assembler, cells)
+    together = pattern.values(cells, blocks) - pattern.elastic_data
+    separate = sum(
+        pattern.values(cells[[k]], blocks[[k]]) - pattern.elastic_data for k in range(cells.size)
+    )
+    np.testing.assert_allclose(together, separate, rtol=1e-12, atol=1e-12 * np.abs(together).max())
+
+
+def test_fixed_pattern_is_cached_and_read_only(assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    assert jacobian.fixed_face_pattern() is pattern
+    for name in ("P_local", "B_local", "position", "indptr", "indices", "elastic_data"):
+        with pytest.raises(ValueError):
+            getattr(pattern, name)[...] = 0
+
+
+def test_fixed_pattern_input_validation(assembler: ResidualAssembler) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    m = pattern.P_local.shape[2]
+    with pytest.raises(ValueError, match="blocks of shape"):
+        pattern.values(np.array([0, 1]), np.zeros((1, m, m)))
+    with pytest.raises(ValueError, match="values"):
+        pattern.matrix(np.zeros(pattern.nnz + 1))
+    S_el = jacobian.condensed_elastic().S_elastic
+    with pytest.raises(ValueError, match="square"):
+        FixedFacePattern(sps.csr_array(S_el[:, 1:]), jacobian.P_face, jacobian.B_face, m)
+    wrong = next(k for k in range(m + 1, 4 * m) if jacobian.P_face.shape[1] % k)
+    with pytest.raises(ValueError, match="m per cell"):
+        FixedFacePattern(S_el, jacobian.P_face, jacobian.B_face, wrong)
+    with pytest.raises(ValueError, match="material trial"):
+        jacobian.fixed_face_values(
+            MaterialHistory.zeros(assembler.layout),
+            ResidualEvaluation(np.zeros(assembler.layout.size), np.zeros(0), np.zeros(0)),
+        )
+
+
+@pytest.mark.parametrize("make", list(SINGLE_CELL.values()), ids=list(SINGLE_CELL))
+def test_fixed_pattern_without_free_faces(make: object) -> None:
+    assembler = make()  # type: ignore[operator]
+    jacobian = AnalyticalJacobian(assembler)
+    pattern = jacobian.fixed_face_pattern()
+    assert pattern.num_face_dofs == 0 and pattern.nnz == 0
+    cells = np.array([0])
+    assert pattern.values(cells, _blocks(assembler, cells)).shape == (0,)

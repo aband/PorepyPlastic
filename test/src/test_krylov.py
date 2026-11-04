@@ -4,6 +4,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -15,9 +16,11 @@ from petsc4py import PETSc  # noqa: E402
 import porepy as pp  # noqa: E402
 
 from core.jacobian import AnalyticalJacobian  # noqa: E402
-from core.krylov import KrylovOptions, KrylovSolver, KrylovSolveStats  # noqa: E402
+from core.krylov import PREDICTOR_ITERATION, KrylovOptions, KrylovSolver, KrylovSolveStats  # noqa: E402
 from core.layout import FloatArray  # noqa: E402
-from core.linear_solvers import CondensedDirectSolver, DirectSolver, LinearSolver  # noqa: E402
+from core.linear_solvers import (  # noqa: E402
+    CondensedDirectSolver, DirectSolver, ElasticPredictor, LinearSolver,
+)
 from core.loading import LoadStepController  # noqa: E402
 from core.newton import solve_newton  # noqa: E402
 from core.residual import LoadIncrement, ResidualAssembler, ResidualEvaluation  # noqa: E402
@@ -124,7 +127,8 @@ def _plane_strain(cells: int = 8) -> tuple[ResidualAssembler, FloatArray]:
 
 
 def _controller(
-    assembler: ResidualAssembler, reference: FloatArray, solver: LinearSolver,
+    assembler: ResidualAssembler, reference: FloatArray, solver: LinearSolver | None,
+    **kwargs: object,
 ) -> LoadStepController:
     layout = assembler.layout
     state = SolutionState.zeros(
@@ -133,6 +137,7 @@ def _controller(
     )
     return LoadStepController(
         assembler, state, reference, line_search=BacktrackingOptions(), linear_solver=solver,
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -179,7 +184,7 @@ def test_rtol_bounds_true_residual_with_right_preconditioning() -> None:
 def test_newton_matches_direct(assembler: ResidualAssembler) -> None:
     old, loads = MaterialHistory.zeros(assembler.layout), _loads(assembler)
     direct = solve_newton(assembler, loads, old, linear_solver=DirectSolver())
-    with KrylovSolver() as solver:
+    with KrylovSolver(KrylovOptions(rtol=1e-8)) as solver:
         krylov = solve_newton(assembler, loads, old, linear_solver=solver)
         assert len(solver.stats) == krylov.iterations
         np.testing.assert_array_equal(krylov.linear_iterations, [s.iterations for s in solver.stats])
@@ -189,8 +194,8 @@ def test_newton_matches_direct(assembler: ResidualAssembler) -> None:
 
 
 @pytest.mark.parametrize("options", [
-    KrylovOptions(),
-    KrylovOptions(preconditioner="ilu"),
+    KrylovOptions(rtol=1e-8),
+    KrylovOptions(preconditioner="ilu", rtol=1e-8),
 ], ids=["gamg", "ilu0"])
 def test_controller_load_unload_matches_direct(options: KrylovOptions) -> None:
     assembler, reference = _plane_strain()
@@ -393,6 +398,19 @@ def test_stats_record_each_solve() -> None:
     {"method": "fgmres", "right_preconditioning": False},
     {"petsc_options": {"-ksp_type": "cg"}},
     {"petsc_options": {"ksp_rtol": 1e-3}},
+    {"rtol_max": 1.0},
+    {"rtol_max": 0.0},
+    {"forcing": "newton"},
+    {"forcing": "eisenstat-walker", "rtol": 0.1, "rtol_max": 0.01},
+    {"ew_gamma": 0.0},
+    {"ew_gamma": 1.5},
+    {"ew_alpha": 1.0},
+    {"ew_alpha": 2.5},
+    {"ew_alpha": True},
+    {"matrix_update": "copy"},
+    {"matrix_update": "in_place", "system": "full"},
+    {"refresh_interpolation": "always"},
+    {"refresh_interpolation": "step"},
 ])
 def test_invalid_options_are_rejected(bad: dict[str, object]) -> None:
     with pytest.raises(ValueError):
@@ -429,3 +447,289 @@ def test_importing_module_does_not_import_petsc() -> None:
         cwd=Path(__file__).resolve().parents[2],   # repository root
     )
     assert result.stdout.strip() == "False"
+
+
+# ---------------------------------------------------------------- tolerance (Phase 4a)
+def test_default_tolerance_is_loose_but_converges_to_direct() -> None:
+    """Newton decides convergence: rtol 1e-3 changes the path, not the accepted state."""
+    assert KrylovOptions().rtol == 1e-3 and KrylovOptions().forcing == "fixed"
+    assembler, reference = _plane_strain()
+    direct = _controller(assembler, reference, DirectSolver())
+    direct.run([0.5, 1.0, 0.6])
+    with KrylovSolver() as solver:
+        krylov = _controller(assembler, reference, solver)
+        krylov.run([0.5, 1.0, 0.6])
+        assert {stats.rtol for stats in solver.stats} == {1e-3}
+    for name in ("x", "face_displacement"):
+        assert _relative(getattr(krylov.state, name), getattr(direct.state, name)) < 1e-5
+    assert _relative(krylov.state.material.plastic_strain, direct.state.material.plastic_strain) < 1e-5
+
+
+def _ew(eta_previous: float, ratio: float, options: KrylovOptions) -> float:
+    eta = options.ew_gamma * ratio ** options.ew_alpha
+    guard = options.ew_gamma * eta_previous ** options.ew_alpha
+    if guard > 0.1:
+        eta = max(eta, guard)
+    return float(min(max(eta, options.rtol), options.rtol_max))
+
+
+def test_eisenstat_walker_sequence() -> None:
+    options = KrylovOptions(forcing="eisenstat-walker", rtol=1e-6, rtol_max=1e-2)
+    with KrylovSolver(options) as solver:
+        norms = [1.0, 0.5, 1e-3, 1e-9, 1e-30]
+        etas = [solver._forcing(norm) for norm in norms]
+    expected = [options.rtol_max]
+    for previous, current in zip(norms, norms[1:]):
+        expected.append(_ew(expected[-1], current / previous, options))
+    assert etas == pytest.approx(expected, rel=1e-14)
+    assert etas[0] == 1e-2           # first correction of a step
+    assert etas[1] == 1e-2           # slow decrease: clamped at rtol_max
+    assert 1e-6 < etas[2] < 1e-2     # fast decrease: tighter
+    assert etas[-1] == 1e-6          # clamped at the lower bound rtol
+
+
+def test_eisenstat_walker_safeguard() -> None:
+    """With a large previous eta, the sequence may not drop by more than the safeguard."""
+    options = KrylovOptions(forcing="eisenstat-walker", rtol=1e-6, rtol_max=0.9)
+    with KrylovSolver(options) as solver:
+        first, second = solver._forcing(1.0), solver._forcing(1e-4)
+    guard = options.ew_gamma * first ** options.ew_alpha
+    assert guard > 0.1
+    assert second == pytest.approx(guard)
+
+
+def test_begin_step_restarts_forcing_and_fixed_ignores_history() -> None:
+    with KrylovSolver(KrylovOptions(forcing="eisenstat-walker", rtol=1e-6)) as solver:
+        solver._forcing(1.0)
+        assert solver._forcing(1e-6) < 1e-2
+        solver.begin_step()
+        # Without the reset, the ratio 1e-12 / 1e-6 would give the lower bound instead.
+        assert solver._forcing(1e-12) == 1e-2
+    with KrylovSolver(KrylovOptions(rtol=1e-4)) as fixed:
+        assert [fixed._forcing(n) for n in (1.0, 1e-3, 1e-9)] == [1e-4] * 3
+
+
+@pytest.mark.parametrize("system", ["condensed", "full"])
+def test_eisenstat_walker_in_newton(system: str) -> None:
+    assembler = CASES["3d-mixed"]()
+    old, loads = MaterialHistory.zeros(assembler.layout), _loads(assembler)
+    direct = solve_newton(assembler, loads, old, linear_solver=DirectSolver())
+    options = KrylovOptions(
+        system=system,  # type: ignore[arg-type]
+        preconditioner="gamg" if system == "condensed" else "ilu",
+        forcing="eisenstat-walker", rtol=1e-8, rtol_max=1e-2,
+    )
+    with KrylovSolver(options) as solver:
+        result = solve_newton(assembler, loads, old, linear_solver=solver)
+        tolerances = [stats.rtol for stats in solver.stats]
+    assert tolerances[0] == 1e-2                         # begin_step restarted the sequence
+    assert all(1e-8 <= eta <= 1e-2 for eta in tolerances)
+    assert tolerances[-1] < tolerances[0]                # tightens as Newton converges
+    # Inexact steps change the path; the accepted iterate meets the same Newton test,
+    # whose absolute tolerance (1e-5) is loose for this soft material.
+    assert np.all(result.residual_norms[-1] <= result.thresholds)
+    assert result.iterations <= direct.iterations + 1
+    assert _relative(result.z, direct.z) < 1e-4
+
+
+# ---------------------------------------------------------------- in-place matrix (Phase 4b)
+def test_in_place_matches_rebuild(assembler: ResidualAssembler) -> None:
+    jacobian, layout = AnalyticalJacobian(assembler), assembler.layout
+    old, evaluation = MaterialHistory.zeros(layout), _plastic_evaluation(assembler)
+    residual = np.random.default_rng(3).normal(size=layout.size)
+    corrections = []
+    updates: tuple[Literal["rebuild", "in_place"], ...] = ("rebuild", "in_place")
+    for update in updates:
+        with KrylovSolver(KrylovOptions(rtol=1e-10, matrix_update=update)) as solver:
+            solver.bind(assembler, jacobian)
+            corrections.append(solver.solve(old, evaluation, residual, iteration=0).correction)
+    for block in (layout.u_slice, layout.r_slice, layout.p_slice, layout.face_slice):
+        assert _relative(corrections[1][block], corrections[0][block]) < 1e-7
+
+
+def test_in_place_keeps_one_matrix_with_fixed_pattern() -> None:
+    assembler = CASES["2d-distorted"]()
+    jacobian, layout = AnalyticalJacobian(assembler), assembler.layout
+    old = MaterialHistory.zeros(layout)
+    elastic = assembler.evaluate(np.zeros(layout.size), LoadIncrement(
+        np.zeros((layout.dim, layout.dirichlet_faces.size)),
+        np.zeros((layout.dim, assembler.neumann_faces.size)), np.zeros(layout.cell_size),
+    ), old)
+    plastic = _plastic_evaluation(assembler)
+    residual = np.ones(layout.size)
+    with KrylovSolver(KrylovOptions(matrix_update="in_place", rtol=1e-10)) as solver:
+        solver.bind(assembler, jacobian)
+        solver.solve(old, elastic, residual, iteration=0)
+        mat = solver._mat
+        indptr, indices, _ = mat.getValuesCSR()
+        solver.solve(old, plastic, residual, iteration=1)     # different plastic set
+        solver.begin_step()                                   # "never": no refresh
+        solver.solve(old, plastic, residual, iteration=0)
+        assert solver._mat is mat
+        new_indptr, new_indices, values = mat.getValuesCSR()
+        np.testing.assert_array_equal(new_indptr, indptr)
+        np.testing.assert_array_equal(new_indices, indices)
+        pattern = jacobian.fixed_face_pattern()
+        np.testing.assert_allclose(values, jacobian.fixed_face_values(old, plastic), rtol=1e-15)
+        assert all(stats.reason.startswith("CONVERGED") for stats in solver.stats)
+
+
+def test_refresh_interpolation_replaces_matrix_each_step() -> None:
+    assembler = CASES["2d-mixed"]()
+    jacobian = AnalyticalJacobian(assembler)
+    old, evaluation = MaterialHistory.zeros(assembler.layout), _plastic_evaluation(assembler)
+    residual = np.ones(assembler.layout.size)
+    options = KrylovOptions(matrix_update="in_place", refresh_interpolation="step")
+    with KrylovSolver(options) as solver:
+        solver.bind(assembler, jacobian)
+        solver.solve(old, evaluation, residual, iteration=0)
+        first = solver._mat
+        solver.solve(old, evaluation, residual, iteration=1)
+        assert solver._mat is first
+        solver.begin_step()
+        assert solver._mat is None
+        solver.solve(old, evaluation, residual, iteration=0)
+        assert solver._mat is not None and solver._mat is not first
+
+
+@pytest.mark.parametrize("preconditioner", ["gamg", "ilu"])
+def test_in_place_controller_matches_direct(preconditioner: str) -> None:
+    assembler, reference = _plane_strain()
+    direct = _controller(assembler, reference, DirectSolver())
+    direct.run([0.5, 1.0, 0.6])
+    options = KrylovOptions(
+        preconditioner=preconditioner, matrix_update="in_place", rtol=1e-8,  # type: ignore[arg-type]
+    )
+    with KrylovSolver(options) as solver:
+        krylov = _controller(assembler, reference, solver)
+        krylov.run([0.5, 1.0, 0.6])
+    assert [r.newton.iterations for r in krylov.steps] == [r.newton.iterations for r in direct.steps]
+    for name in ("x", "face_displacement"):
+        assert _relative(getattr(krylov.state, name), getattr(direct.state, name)) < 1e-6
+
+
+def _prolongation(solver: KrylovSolver) -> tuple[int, FloatArray]:
+    """Handle and values of GAMG's finest prolongation operator."""
+    interpolation = solver._ksp.getPC().getMGInterpolation(1)
+    return interpolation.handle, np.array(interpolation.getValuesCSR()[2], copy=True)
+
+
+@pytest.mark.parametrize(("update", "petsc_options", "reused"), [
+    ("in_place", {}, True),
+    ("in_place", {"pc_gamg_reuse_interpolation": "false"}, False),   # user options win
+    ("rebuild", {}, False),
+], ids=["in-place", "in-place-user-off", "rebuild"])
+def test_gamg_interpolation_reuse(update: str, petsc_options: dict[str, str], reused: bool) -> None:
+    """In-place updates keep GAMG's prolongation although the matrix values change."""
+    assembler, reference = _plane_strain(12)
+    jacobian, layout = AnalyticalJacobian(assembler), assembler.layout
+    old = MaterialHistory.zeros(layout)
+    no_load = np.zeros((layout.dim, 0)), np.zeros(layout.cell_size)
+    elastic = assembler.evaluate(np.zeros(layout.size), LoadIncrement(0.0 * reference, *no_load), old)
+    plastic = assembler.evaluate(np.zeros(layout.size), LoadIncrement(reference, *no_load), old)
+    assert plastic.material_trial is not None
+    assert np.any(plastic.material_trial.return_map.dgamma > 0.0)
+    options = KrylovOptions(matrix_update=update, petsc_options=petsc_options)  # type: ignore[arg-type]
+    with KrylovSolver(options) as solver:
+        solver.bind(assembler, jacobian)
+        solver.solve(old, elastic, np.ones(layout.size), iteration=0)
+        before = _prolongation(solver)
+        solver.solve(old, plastic, np.ones(layout.size), iteration=1)
+        after = _prolongation(solver)
+    assert (before[0] == after[0]) is reused
+    assert (before[1].shape == after[1].shape and np.array_equal(before[1], after[1])) is reused
+    assert not [name for name in PETSc.Options().getAll() if name.startswith("core_krylov")]
+
+
+# ---------------------------------------------------------------- elastic predictor (Phase 4c)
+@pytest.mark.parametrize("options", [
+    KrylovOptions(rtol=1e-10),
+    KrylovOptions(preconditioner="ilu", rtol=1e-10),
+    KrylovOptions(system="full", preconditioner="ilu", rtol=1e-10),
+    KrylovOptions(matrix_update="in_place", rtol=1e-10),
+], ids=["condensed-gamg", "condensed-ilu", "full-ilu", "in-place"])
+def test_solve_elastic_matches_direct(assembler: ResidualAssembler, options: KrylovOptions) -> None:
+    jacobian = AnalyticalJacobian(assembler)
+    rhs = np.random.default_rng(7).normal(size=assembler.layout.size)
+    expected = sps.linalg.spsolve(sps.csc_matrix(jacobian.L), rhs)
+    with KrylovSolver(options) as solver:
+        solver.bind(assembler, jacobian)
+        result = solver.solve_elastic(rhs)
+        assert solver.stats[-1].iteration == PREDICTOR_ITERATION
+        assert result.iterations == solver.stats[-1].iterations > 0
+    for block in (assembler.layout.u_slice, assembler.layout.face_slice):
+        assert _relative(result.correction[block], expected[block]) < 1e-7
+
+
+def test_elastic_ksp_is_built_once_and_separate() -> None:
+    assembler = CASES["3d-mixed"]()
+    jacobian = AnalyticalJacobian(assembler)
+    old, evaluation = MaterialHistory.zeros(assembler.layout), _plastic_evaluation(assembler)
+    rhs = np.ones(assembler.layout.size)
+    with KrylovSolver(KrylovOptions(matrix_update="in_place")) as solver:
+        solver.bind(assembler, jacobian)
+        solver.solve_elastic(rhs)
+        elastic_ksp, elastic_mat = solver._elastic_ksp, solver._elastic_mat
+        solver.solve(old, evaluation, rhs, iteration=0)
+        solver.solve_elastic(2.0 * rhs)
+        assert solver._elastic_ksp is elastic_ksp and solver._elastic_mat is elastic_mat
+        # The Newton KSP keeps its in-place operator (and with it the reusable PC).
+        operator, _ = solver._ksp.getOperators()
+        assert operator.handle == solver._mat.handle
+        assert solver._elastic_ksp is not solver._ksp
+        assert elastic_ksp.getOptionsPrefix() != solver._ksp.getOptionsPrefix()
+        # The elastic preconditioner is set up once; the second solve only iterates.
+        first, second = (s for s in solver.stats if s.iteration == PREDICTOR_ITERATION)
+        assert second.setup_time < first.setup_time
+    assert solver._elastic_ksp is None and solver._elastic_mat is None and solver._mat is None
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_solve_elastic_without_free_faces_never_calls_petsc(dim: int) -> None:
+    assembler = _assembler(_rotated_cell(dim))
+    jacobian = AnalyticalJacobian(assembler)
+    rhs = np.random.default_rng(8).normal(size=assembler.layout.size)
+    with KrylovSolver() as solver:
+        solver.bind(assembler, jacobian)
+        result = solver.solve_elastic(rhs)
+        assert solver._elastic_ksp is None and not solver.stats
+    expected = sps.linalg.spsolve(sps.csc_matrix(jacobian.L), rhs)
+    assert _relative(result.correction, expected) < 1e-12
+
+
+def test_solve_elastic_failure_and_fallback() -> None:
+    assembler = CASES["2d-mixed"]()
+    jacobian = AnalyticalJacobian(assembler)
+    rhs = np.ones(assembler.layout.size)
+    expected = sps.linalg.spsolve(sps.csc_matrix(jacobian.L), rhs)
+    with KrylovSolver(KrylovOptions(max_iterations=1, rtol=1e-12)) as failing:
+        failing.bind(assembler, jacobian)
+        with pytest.raises(NewtonDivergenceError, match="elastic predictor"):
+            failing.solve_elastic(rhs)
+    options = KrylovOptions(max_iterations=1, rtol=1e-12, fallback_to_direct=True)
+    with KrylovSolver(options) as solver:
+        solver.bind(assembler, jacobian)
+        result = solver.solve_elastic(rhs)
+        assert solver.stats[-1].fallback
+    assert _relative(result.correction, expected) < 1e-12
+
+
+def test_controller_with_krylov_predictor() -> None:
+    assembler, reference = _plane_strain()
+    plain = _controller(assembler, reference, DirectSolver())
+    plain.run([0.5, 1.0, 0.6])
+    with KrylovSolver(KrylovOptions(rtol=1e-8)) as solver:
+        predicted = _controller(assembler, reference, solver, predictor="elastic")
+        predicted.run([0.5, 1.0, 0.6])
+        predictor_solves = [s for s in solver.stats if s.iteration == PREDICTOR_ITERATION]
+    assert len(predictor_solves) == 3                       # one per load step
+    assert all(record.predictor_time > 0.0 for record in predicted.steps)
+    for name in ("x", "face_displacement"):
+        assert _relative(getattr(predicted.state, name), getattr(plain.state, name)) < 1e-6
+
+
+def test_krylov_solver_is_elastic_predictor() -> None:
+    with KrylovSolver() as solver:
+        assert isinstance(solver, ElasticPredictor)
+    with pytest.raises(RuntimeError, match="closed"):
+        solver.solve_elastic(np.zeros(1))

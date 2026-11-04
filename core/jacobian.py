@@ -8,7 +8,8 @@ from utils.reconstruction import mandel_basis
 from core.state import MaterialHistory, MaterialTrial
 from material.tensor import deviatoric_projector
 
-from core.condensation import CondensedElasticSystem
+from core.condensation import CondensedElasticSystem, FixedFacePattern
+from core.layout import FloatArray, IntArray
 
 class AnalyticalJacobian:
     """Analytical derivatives of the retained cell/face residual."""
@@ -74,6 +75,7 @@ class AnalyticalJacobian:
         self.P_face = sps.csr_array(self.P[face])
         self.B_face = sps.csr_array(self.operators.B_free)
         self._condensed: CondensedElasticSystem | None = None
+        self._fixed_pattern: FixedFacePattern | None = None
 
         self.H = self._build_auxiliary_matrix()
 
@@ -106,6 +108,32 @@ class AnalyticalJacobian:
         if self._condensed is None:
             self._condensed = CondensedElasticSystem(self.L, self.layout)
         return self._condensed
+
+    def fixed_face_pattern(self) -> FixedFacePattern:
+        """Fixed CSR pattern of S_el + K_p for any set of plastic cells; built once, cached."""
+        if self._fixed_pattern is None:
+            self._fixed_pattern = FixedFacePattern(
+                self.condensed_elastic().S_elastic,
+                self.P_face,
+                self.B_face,
+                self._mandel_projection.shape[0],
+            )
+        return self._fixed_pattern
+
+    def fixed_face_values(
+            self,
+            committed: MaterialHistory,
+            evaluation: ResidualEvaluation,
+        ) -> FloatArray:
+        """Data of the condensed face matrix S_el + P_f D_Q B_f on fixed_face_pattern()."""
+        trial = evaluation.material_trial
+        if trial is None:
+            raise ValueError(
+                "Jacobian evaluation requires a material trial "
+                "from ResidualAssembler.evaluate()."
+            )
+        cells, blocks = self._material_correction_blocks(committed, trial)
+        return self.fixed_face_pattern().values(cells, blocks)
 
     def _build_elastic_traction_matrix(self) -> sps.csr_array:
         """Differentiate integrated elastic side tractions with respect to z."""
@@ -361,13 +389,12 @@ class AnalyticalJacobian:
 
         return matrix
 
-    def _build_material_correction_tangent(
+    def _material_correction_blocks(
         self,
         committed: MaterialHistory,
         trial: MaterialTrial,
-    ) -> sps.csr_array:
-        """
-        Return blockdiag(C_e^M - C_alg^M) for the current material trial.
+    ) -> tuple[IntArray, FloatArray]:
+        """Plastic cells and their dense Mandel blocks of C_e - C_alg, shape (k, m, m).
 
         committed is fixed throughout the load step.
         trial must come from the residual evaluation at the current candidate.
@@ -394,24 +421,41 @@ class AnalyticalJacobian:
 
         M = self._mandel_projection
         m = M.shape[0]
-        size = m * nc
 
         cells, c_dev, c_nn = self.assembler.material.tangent_correction(trial)
+        cells = np.asarray(cells, dtype=np.int64)
 
         # All cells followed the elastic branch.
         if cells.size == 0:
-            return sps.csr_array((size, size), dtype=np.float64)
+            return cells, np.zeros((0, m, m))
 
         # In-plane Mandel flow directions, shape (m, plastic cells).
         direction = trial.return_map.flow_direction[:nd, :nd, cells]
         n_mandel = M @ direction.reshape(nd * nd, cells.size, order="C")
 
-        # Blocks ordered (cell, row, column) to match the index layout below.
+        # Blocks ordered (cell, row, column).
         blocks = (
             c_dev[:, None, None] * self._deviatoric_mandel[None, :, :]
             + c_nn[:, None, None]
             * np.einsum("ak,bk->kab", n_mandel, n_mandel)
         )
+        if not np.all(np.isfinite(blocks)):
+            raise ValueError("Material correction tangent must remain finite.")
+        return cells, blocks
+
+    def _build_material_correction_tangent(
+        self,
+        committed: MaterialHistory,
+        trial: MaterialTrial,
+    ) -> sps.csr_array:
+        """Return blockdiag(C_e^M - C_alg^M) for the current material trial."""
+        m = self._mandel_projection.shape[0]
+        size = m * self.layout.num_cells
+        cells, blocks = self._material_correction_blocks(committed, trial)
+
+        # All cells followed the elastic branch.
+        if cells.size == 0:
+            return sps.csr_array((size, size), dtype=np.float64)
 
         # Preserve each plastic cell's original global position
         offsets = m * cells

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import time
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import numpy as np
+import scipy.sparse as sps
 
 from core.condensation import CondensedElasticSystem
 from core.jacobian import AnalyticalJacobian
@@ -14,6 +17,11 @@ from core.layout import FloatArray
 from core.residual import ResidualAssembler, ResidualEvaluation
 from core.state import MaterialHistory
 from utils.newton_utils import NewtonDivergenceError, _solve_linear_correction
+
+try:  # same choice as _solve_linear_correction
+    import scikits.umfpack as umfpack  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - depends on the environment
+    umfpack = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -44,6 +52,17 @@ class LinearSolver(Protocol):
         """Return the Newton correction; raise NewtonDivergenceError on failure."""
 
 
+@runtime_checkable
+class ElasticPredictor(Protocol):
+    """Optional capability: solve with the elastic Jacobian L (fixed for the run).
+
+    LoadStepController(predictor="elastic") uses it for each step's starting guess.
+    """
+
+    def solve_elastic(self, rhs: FloatArray) -> LinearSolveResult:
+        """Return x with L x = rhs; raise NewtonDivergenceError on failure."""
+
+
 class _BoundSolver:
     """Shared binding checks: one solver instance serves one assembler."""
 
@@ -66,7 +85,49 @@ class _BoundSolver:
         return self._jacobian
 
 
-class DirectSolver(_BoundSolver):
+def _factorize(matrix: sps.csr_array) -> Callable[[FloatArray], FloatArray]:
+    """Factor once (UMFPACK, SuperLU fallback); singular matrices raise NewtonDivergenceError."""
+    csc = sps.csc_matrix(matrix, dtype=np.float64, copy=True)
+    csc.sum_duplicates()
+    try:
+        if umfpack is None:
+            factor = sps.linalg.splu(sps.csc_array(csc))
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", umfpack.UmfpackWarning)
+                factor = umfpack.splu(csc)
+    except (RuntimeError, umfpack.UmfpackWarning if umfpack else RuntimeError) as error:
+        raise NewtonDivergenceError("Elastic face matrix factorization failed.") from error
+    return lambda rhs: np.asarray(factor.solve(np.asarray(rhs, dtype=np.float64)), dtype=np.float64)
+
+
+class _DirectBase(_BoundSolver):
+    """Direct solvers share one cached factorization of S_el for solve_elastic."""
+
+    _elastic_factor: Callable[[FloatArray], FloatArray] | None = None
+
+    def bind(self, assembler: ResidualAssembler, jacobian: AnalyticalJacobian) -> None:
+        if jacobian is not self._jacobian:
+            self._elastic_factor = None   # factorization belongs to the old Jacobian
+        super().bind(assembler, jacobian)
+
+    def solve_elastic(self, rhs: FloatArray) -> LinearSolveResult:
+        """L x = rhs through the condensed elastic system; S_el is factored once."""
+        start = time.perf_counter()
+        system = self._require_jacobian().condensed_elastic()
+
+        def face_solver(S: sps.csr_array, b: FloatArray) -> FloatArray:
+            if self._elastic_factor is None:
+                self._elastic_factor = _factorize(S)
+            return self._elastic_factor(b)
+
+        correction = system.solve(np.asarray(rhs, dtype=np.float64), None, face_solver)
+        if not np.all(np.isfinite(correction)):
+            raise NewtonDivergenceError("Elastic predictor produced a non-finite solution.")
+        return LinearSolveResult(correction, 0, time.perf_counter() - start)
+
+
+class DirectSolver(_DirectBase):
     """Assemble the full Jacobian and factor it (UMFPACK, SuperLU fallback)."""
 
     def solve(
@@ -82,7 +143,7 @@ class DirectSolver(_BoundSolver):
         return LinearSolveResult(correction, 0, time.perf_counter() - start)
 
 
-class CondensedDirectSolver(_BoundSolver):
+class CondensedDirectSolver(_DirectBase):
     """UMFPACK on the condensed face system; reference for condensed Krylov solvers."""
 
     _system: CondensedElasticSystem | None = None
@@ -113,6 +174,7 @@ class CondensedDirectSolver(_BoundSolver):
             lambda S, b: _solve_linear_correction(S, -b, iteration),
         )
         return LinearSolveResult(correction, 0, time.perf_counter() - start)
+
 
 def _checked(result: LinearSolveResult, size: int, iteration: int) -> FloatArray:
     """Validate a solver's correction; used by solve_newton for every solver."""

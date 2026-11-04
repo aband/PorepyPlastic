@@ -288,6 +288,11 @@ def run_mesh(level:int) -> None:
     )
     print(path)
 
+def run_case(
+        level:int,
+        *,
+    ) -> None:
+
 if __name__ == "__main__":
     run_mesh(0)
     run_mesh(1)

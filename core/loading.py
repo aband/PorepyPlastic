@@ -1,5 +1,7 @@
+import time
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -17,11 +19,18 @@ from utils.load_schedule import(
 from utils.newton_utils import(
     BacktrackingOptions,
     NewtonConvergenceError,
+    NewtonDivergenceError,
     _residual_block_norms,
     _validate_newton_options,
 )
 
-from core.linear_solvers import LinearSolver
+from core.linear_solvers import (
+    CondensedDirectSolver,
+    ElasticPredictor,
+    LinearSolver,
+)
+
+Predictor = Literal["zero", "elastic"]
 
 @dataclass(eq=False)
 class LoadStepResult:
@@ -29,9 +38,17 @@ class LoadStepResult:
     state: SolutionState
     newton: NewtonResult
     residual: FloatArray # Total residual of the accepted state
+    predictor_time: float = 0.0  # elastic starting-guess solve; 0 for predictor="zero"
 
 class LoadStepController(_LoadStepSchedule[LoadStepResult]):
-    """Proportional loading with fixed geometry and material parameters."""
+    """Proportional loading with fixed geometry and material parameters.
+
+    predictor="elastic" starts each step's Newton iteration from the elastic
+    solution z0 = -L^-1 (R_committed + R_el(0)) instead of z = 0, which keeps
+    the Dirichlet increment from landing entirely in the boundary cells. The
+    solve uses linear_solver.solve_elastic (see ElasticPredictor), or a private
+    CondensedDirectSolver when linear_solver is None.
+    """
     def __init__(
         self,
         assembler: ResidualAssembler,
@@ -46,6 +63,7 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
         rtol: BlockTolerances = (1e-8, 1e-8, 1e-8, 1e-8),
         line_search: BacktrackingOptions | None = None,
         linear_solver: LinearSolver | None = None,
+        predictor: Predictor = "zero",
     ) -> None:
         self._assembler = assembler
         layout = assembler.layout
@@ -59,6 +77,17 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
             raise ValueError("line_search must be BacktrackingOptions or None.")
         if linear_solver is not None and not isinstance(linear_solver, LinearSolver):
             raise ValueError("linear_solver must implement LinearSolver or None.")
+        if predictor not in ("zero", "elastic"):
+            raise ValueError("predictor must be 'zero' or 'elastic'.")
+        if (
+            predictor == "elastic"
+            and linear_solver is not None
+            and not isinstance(linear_solver, ElasticPredictor)
+        ):
+            raise ValueError(
+                "predictor='elastic' requires a linear_solver with solve_elastic "
+                "(ElasticPredictor) or linear_solver=None."
+            )
 
         self._committed = committed.copy()
         for name, shape in (
@@ -119,6 +148,15 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
             linear_solver.bind(assembler, self._jacobian)
         self._linear_solver = linear_solver
 
+        self._predictor: ElasticPredictor | None = None
+        if predictor == "elastic":
+            if isinstance(linear_solver, ElasticPredictor):
+                self._predictor = linear_solver
+            else:
+                direct = CondensedDirectSolver()
+                direct.bind(assembler, self._jacobian)
+                self._predictor = direct
+
         self._committed_residual = assemble_state_residual(
             assembler, self._committed,
         )
@@ -175,11 +213,14 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
                 target_b - old.cell_source,
             )
 
+            initial_z, predictor_time = self._starting_guess(loads)
+
             newton = solve_newton(
                 assembler,
                 loads,
                 old.material,
                 jacobian=self._jacobian,
+                initial_z=initial_z,
                 committed_residual=self._committed_residual,
                 max_iterations=self._max_iterations,
                 atol=self._atol,
@@ -219,7 +260,7 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
                     "Accumulated state exceeds Newton residual thresholds."
                 )
 
-            record = LoadStepResult(factor, candidate, newton, residual)
+            record = LoadStepResult(factor, candidate, newton, residual, predictor_time)
             returned = deepcopy(record)
 
         except Exception as error:
@@ -241,6 +282,23 @@ class LoadStepController(_LoadStepSchedule[LoadStepResult]):
             factor,
         )
         return returned
+
+    def _starting_guess(self, loads: LoadIncrement) -> tuple[FloatArray | None, float]:
+        """Elastic solution of this increment, or None (start from zero)."""
+        if self._predictor is None:
+            return None, 0.0
+        start = time.perf_counter()
+        size = self._assembler.layout.size
+        # R(z) = R_committed + R_el(0) + L z while every cell stays elastic.
+        elastic = self._assembler.evaluate_elastic(np.zeros(size), loads)
+        result = self._predictor.solve_elastic(-(self._committed_residual + elastic.residual))
+        initial = np.asarray(result.correction, dtype=np.float64)
+        if initial.shape != (size,):
+            raise RuntimeError(f"Elastic predictor returned shape {initial.shape}; expected ({size},).")
+        if not np.all(np.isfinite(initial)):
+            raise NewtonDivergenceError("Elastic predictor produced a non-finite starting guess.")
+        return initial, time.perf_counter() - start
+
 
 def assemble_state_residual(
     assembler: ResidualAssembler,

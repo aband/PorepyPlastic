@@ -196,3 +196,33 @@ def test_nonsimplex_grid_is_rejected_without_mutation() -> None:
     with pytest.raises(ValueError, match="simplex"):
         preprocess_simplex_grid(grid)
     np.testing.assert_array_equal(grid.cell_centers, original)
+
+
+@pytest.mark.parametrize(("scale", "offset"), [(1e-6, 0.0), (1.0, 1e3), (10.0, 1e4)])
+def test_normalized_preprocessing_handles_any_length_scale(scale: float, offset: float) -> None:
+    """PorePy's absolute tol fails tiny cells (degeneracy check) and large
+    coordinates (equidistance check); normalize=True handles both."""
+    reference = _triangles(acute=True)
+    centers, shift, _ = preprocess_simplex_grid(reference)
+    grid = _triangles(acute=True)
+    grid.nodes[:2] = grid.nodes[:2] * scale + offset
+    grid.compute_geometry()
+    with pytest.raises((AssertionError, ValueError)):
+        preprocess_simplex_grid(grid)
+    grid.compute_geometry()
+    scaled, scaled_shift, changed = preprocess_simplex_grid(grid, normalize=True)
+    assert grid.cell_centers is scaled and np.all(changed)
+    np.testing.assert_allclose(scaled_shift, shift)
+    np.testing.assert_allclose(scaled[:2], centers[:2] * scale + offset, rtol=0, atol=1e-13 * (scale + offset))
+
+
+def test_normalized_preprocessing_matches_default_on_unit_grids() -> None:
+    for acute in (True, False):
+        grid, other = _triangles(acute=acute), _triangles(acute=acute)
+        expected = preprocess_simplex_grid(grid)
+        actual = preprocess_simplex_grid(other, normalize=True)
+        np.testing.assert_allclose(actual[0], expected[0], rtol=0, atol=1e-14)
+        np.testing.assert_allclose(actual[1], expected[1], rtol=0, atol=1e-12)
+        np.testing.assert_array_equal(actual[2], expected[2])
+    repeated = preprocess_simplex_grid(other, normalize=True)
+    assert not np.any(repeated[2])
