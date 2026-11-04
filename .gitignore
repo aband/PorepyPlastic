@@ -8,3 +8,18 @@
 /output/
 /outputs/
 *.pdf
+
+# Python bytecode (anywhere in the tree)
+__pycache__/
+*.pyc
+
+# Frozen: alternatives and prototype (and their tests) are not committed any more.
+# These rules keep NEW files there out of git. Files that are already tracked are
+# frozen locally with skip-worktree (local edits are then invisible to git):
+#   git ls-files -z alternatives prototype test/alternatives test/prototype \
+#     | xargs -0 git update-index --skip-worktree
+# Undo with --no-skip-worktree (needed before a pull/checkout that changes them).
+/alternatives/
+/prototype/
+/test/alternatives/
+/test/prototype/
