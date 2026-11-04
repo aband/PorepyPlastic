@@ -9,7 +9,7 @@ from typing import TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from utils.newton_utils import JacobianMatrix, NewtonConvergenceError, _residual_block_norms, _solve_linear_correction, _validate_newton_options
+from utils.newton_utils import JacobianMatrix, NewtonConvergenceError, _residual_block_norms, _solve_linear_correction, _validate_newton_options, NewtonDivergenceError
 from utils.state import TpsaState
 from material.material_state import MaterialPoint
 from prototype.jacobian import RetainedAnalyticalJacobian
@@ -19,28 +19,29 @@ from prototype.residual import RetainedFaceResidual, evaluate_global_residual
 JacobianCallback: TypeAlias = Callable[[NDArray[np.float64], RetainedFaceResidual], JacobianMatrix]
 BlockTolerances: TypeAlias = tuple[float, float, float, float]
 
-
-@dataclass(frozen=True)
-class BacktrackingOptions:
-    """Armijo search: try 1, factor, factor**2, ... for each Newton correction.
-
-    max_backtracks counts reductions AFTER the full-step trial. Material and
-    linear-solve errors propagate; only finite residuals are compared for search.
-    """
-
-    factor: float = 0.5
-    armijo: float = 1e-4
-    max_backtracks: int = 12
-
-    def __post_init__(self) -> None:
-        if not np.isfinite(self.factor) or not 0 < self.factor < 1:
-            raise ValueError("Backtracking factor must lie strictly between zero and one.")
-        if not np.isfinite(self.armijo) or not 0 < self.armijo < 0.5:
-            raise ValueError("Armijo coefficient must lie strictly between zero and 0.5.")
-        if (isinstance(self.max_backtracks, bool)
-                or not isinstance(self.max_backtracks, (int, np.integer)) or self.max_backtracks < 0):
-            raise ValueError("max_backtracks must be a nonnegative integer.")
-
+#
+#@dataclass(frozen=True)
+#class BacktrackingOptions:
+#    """Armijo search: try 1, factor, factor**2, ... for each Newton correction.
+#
+#    max_backtracks counts reductions AFTER the full-step trial. Material and
+#    linear-solve errors propagate; only finite residuals are compared for search.
+#    """
+#
+#    factor: float = 0.5
+#    armijo: float = 1e-4
+#    max_backtracks: int = 12
+#
+#    def __post_init__(self) -> None:
+#        if not np.isfinite(self.factor) or not 0 < self.factor < 1:
+#            raise ValueError("Backtracking factor must lie strictly between zero and one.")
+#        if not np.isfinite(self.armijo) or not 0 < self.armijo < 0.5:
+#            raise ValueError("Armijo coefficient must lie strictly between zero and 0.5.")
+#        if (isinstance(self.max_backtracks, bool)
+#                or not isinstance(self.max_backtracks, (int, np.integer)) or self.max_backtracks < 0):
+#            raise ValueError("max_backtracks must be a nonnegative integer.")
+#
+from utils.newton_utils import BacktrackingOptions as BacktrackingOptions
 
 @dataclass(eq=False)
 class RetainedNewtonResult:
@@ -83,6 +84,7 @@ def solve_newton(
     atol: BlockTolerances = (1e-5, 1e-12, 1e-12, 1e-5),
     rtol: BlockTolerances = (1e-8, 1e-8, 1e-8, 1e-8),
     line_search: BacktrackingOptions | None = None,
+    convergence_check: Callable[[RetainedFaceResidual], bool] | None = None,
 ) -> RetainedNewtonResult:
     """Solve Section 4.2 of Plasticity_revised.pdf at fixed committed history.
 
@@ -91,6 +93,8 @@ def solve_newton(
     z are solved simultaneously with K delta_z = -R. No auxiliary elimination
     or independent material-iterate correction is performed. initial_z defaults
     to zero LOAD-STEP increments, even when the committed state is nonzero.
+    Prescribed mixed-face components are set to their target increments before
+    the first evaluation, including when initial_z is supplied.
 
     Boundary data is absolute; body_force_increment is integrated (dim,nc) and
     committed_residual is a known old imbalance (num_dofs,). These inputs and
@@ -103,6 +107,10 @@ def solve_newton(
     fixed thresholds and four explicit entries [u,r,p,face]. Norms are Euclidean
     norms of integrated residuals, not spatial L2 errors. The defaults use SI
     force/kinematic units. An empty free-face block has norm zero.
+    An optional convergence_check supplies an additional acceptance condition
+    on the same evaluation (including committed_residual). It is called only
+    after all block tolerances pass, must not mutate the evaluation, and must
+    also pass before Newton returns or bypasses the Armijo test.
 
     Full steps are the default. Optional backtracking uses the fixed scaled
     merit phi = 0.5*sum_b (||R_b||_2/s_b)**2. Start with
@@ -126,11 +134,13 @@ def solve_newton(
     z = np.zeros(size) if initial_z is None else np.array(initial_z, dtype=np.float64, copy=True)
     operators._validate_unknowns(z)
     values = np.asarray(bc_values, dtype=np.float64)
-    bf = operators.dirichlet_faces
-    if values.shape != (nd, nf) or not np.all(np.isfinite(values[:, bf])):
+    mask = operators.dirichlet_mask
+    if values.shape != (nd, nf) or not np.all(np.isfinite(values[mask])):
         raise ValueError(f"Expected bc_values ({nd}, {nf}), finite on boundary faces.")
     boundary = np.zeros((nd, nf))
-    boundary[:, bf] = values[:, bf]
+    boundary[mask] = values[mask]
+    components, faces = operators.constraint_components, operators.constraint_faces
+    z[operators.constraint_dofs] = boundary[components, faces] - old.bc_values[components, faces]
     body = None if body_force_increment is None else np.array(body_force_increment, dtype=np.float64, copy=True)
     neumann = None if neumann_increment is None else np.array(neumann_increment, dtype=np.float64, copy=True)
     imbalance = None if committed_residual is None else np.array(committed_residual, dtype=np.float64, copy=True)
@@ -159,15 +169,20 @@ def solve_newton(
     lengths: list[float] = []
     callback = jacobian
 
+    def converged(result: RetainedFaceResidual, block_norms: NDArray[np.float64]) -> bool:
+        return bool(np.all(block_norms <= thresholds)) and (
+            convergence_check is None or bool(convergence_check(result))
+        )
+
     def scaled_norm(values: NDArray[np.float64]) -> float:
         with np.errstate(over="ignore", invalid="ignore"):
             norm = float(np.linalg.norm(values / scales))
         if not np.isfinite(norm):
-            raise RuntimeError("Newton line-search merit must remain finite.")
+            raise NewtonDivergenceError("Newton line-search merit must remain finite.")
         return norm
 
     for iteration in range(max_iterations + 1):
-        if np.all(norms <= thresholds):
+        if converged(evaluation, norms):
             return RetainedNewtonResult(
                 evaluation, iteration, np.stack(history), thresholds,
                 np.array(lengths, dtype=np.float64), evaluations,
@@ -186,9 +201,9 @@ def solve_newton(
             with np.errstate(over="ignore", invalid="ignore"):
                 candidate = z + alpha * correction
             if not np.all(np.isfinite(candidate)):
-                raise RuntimeError(f"Newton produced a non-finite candidate at iteration {iteration + 1}.")
+                raise NewtonDivergenceError(f"Newton produced a non-finite candidate at iteration {iteration + 1}.")
             trial, trial_norms = evaluate(candidate)
-            if (line_search is None or np.all(trial_norms <= thresholds)
+            if (line_search is None or converged(trial, trial_norms)
                     or scaled_norm(trial_norms) <= np.sqrt(1 - 2 * line_search.armijo * alpha) * merit_norm):
                 z, evaluation, norms = candidate, trial, trial_norms
                 history.append(norms)

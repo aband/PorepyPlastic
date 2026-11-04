@@ -5,7 +5,7 @@ formulations. The main solver in `prototype/` retains cell fields and interior-f
 displacements, with constitutive return maps nested inside global Newton.
 The original and coupled strain formulations remain available for comparison.
 
-The current plastic examples use full displacement Dirichlet conditions on a
+The unit-square plastic examples use full displacement Dirichlet conditions on a
 unit-square Cartesian grid. Material updates retain full 3D stress and plastic
 history under the plane-strain constraint.
 
@@ -42,6 +42,8 @@ Use `--output-dir PATH` for a separate run directory.
 | `python -m examples.compare_jacobians --adaptive` | Analytical/finite-difference Jacobian difference at the same Dirichlet peak state |
 | `python -m examples.elastic_plane_strain` | Elastic TPSA baseline and strain reconstruction |
 | `python -m examples.visualize_newton_stress --help` | Animation of the local constitutive return-map iteration |
+| `python -m examples.strip_footing_example` | Textbook smooth strip footing: prototype plane strain, roller supports, perfectly plastic J2 soil |
+| `python -m examples.strip_footing_alternatives` | Same strip footing with the coupled cell/strain solver in `alternatives/` |
 
 The two plastic examples select the formulation independently of the Jacobian:
 

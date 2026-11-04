@@ -14,14 +14,25 @@ main porepy code. Expect tensor object.)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Type, Callable
+#from typing import Type, Callable
 from abc import ABC
 
 import numpy as np
+from numpy.typing import NDArray
+
 import porepy as pp
 
 from material.scalar_hardening import HardeningParameters, ScalarHardeningLaw
-from material.tensor import Tensor, stress, strain
+from material.tensor import Tensor, stress, strain, deviatoric_projector, close_to_transpose
+
+ReturnMapValues = tuple[stress, strain, stress, float, float]
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ReturnMapData:
+    """Intermediate quantities from one specific material trial."""
+    dgamma        : float
+    trial_norm    : float
+    flow_direction: NDArray[np.float64] | None
 
 @dataclass
 class ReturnStates:
@@ -30,11 +41,24 @@ class ReturnStates:
     iteratoins     : int
     plastic_multiplier : float
 
+class ReturnMapConvergenceError(RuntimeError):
+    """Local consistency iteration did not converge."""
+#    if not np.isfinite(residual) or abs(residual) > residual_tolerance:
+#        raise RuntimeError(
+#            f"Local Newton iteration did not converge: R={residual:.3e}, "
+#            f"tolerance={residual_tolerance:.3e}"
+#        )
+
+
 class _materialProperty:
     """Helper class to store material properties."""
 
     young_modulus: float
     poisson_ratio: float
+
+    # Cache elastic tensor
+    _elastic_key: tuple[float, float] | None = None
+    _elastic_cache: Tensor | None = None
 
     @property
     def isotropic_shear_modulus(self) -> float:
@@ -51,14 +75,25 @@ class _materialProperty:
     @property
     def elastic_tensor(self) -> Tensor:
         """Three-dimensional isotropic stiffness acting on symmetric strain."""
-        identity = np.eye(3)
-        return Tensor(
-            self.lame_parameter * np.einsum("ij,kl->ijkl", identity, identity)
-            + self.isotropic_shear_modulus * (
-                np.einsum("ik,jl->ijkl", identity, identity)
-                + np.einsum("il,jk->ijkl", identity, identity)
+        key = (self.young_modulus, self.poisson_ratio)
+
+        if self._elastic_cache is None or self._elastic_key != key:
+            identity = np.eye(3)
+
+            values = (
+                self.lame_parameter * np.einsum("ij,kl->ijkl", identity, identity)
+                    + self.isotropic_shear_modulus * (
+                    np.einsum("ik,jl->ijkl", identity, identity)
+                    + np.einsum("il,jk->ijkl", identity, identity)
+                )
             )
-        )
+
+            # Cached stiffness is shared by its consumers.
+            values.setflags(write=False)
+            self._elastic_cache = Tensor(values, copy=False)
+            self._elastic_key   = key
+
+        return self._elastic_cache
 
     def elastic_tensor_tpsa(self, num_cells: int = 1) -> pp.FourthOrderTensor:
         """Return PorePy stiffness with uniform elastic moduli over the cells.
@@ -124,13 +159,13 @@ class vonMisesModel(abstractMaterialEvaluate):
     """
 
     def evaluate_equivalent_stress(self, 
-                                   deviatoric_stress:tensor.stress) -> float:
+                                   deviatoric_stress:stress) -> float:
         """Compute equivalent von mises stress."""
         #return np.sqrt(3.0/2.0)*np.linalg.norm(stress.deviatoric)
-        return np.sqrt(1.5*
-                       np.einsum("ij,ij->",
-                                 deviatoric_stress.to_numpy(),
-                                 deviatoric_stress.to_numpy()))
+        values = deviatoric_stress.to_numpy(copy=False)
+        return float(
+            np.sqrt(1.5*np.einsum("ij,ij->",values,values))
+        )
 
     def consistency_parameter(self,
                               xi_trial_norm: float,
@@ -213,14 +248,14 @@ class vonMisesModel(abstractMaterialEvaluate):
             )
 
         if not np.isfinite(residual) or abs(residual) > residual_tolerance:
-            raise RuntimeError(
+            raise ReturnMapConvergenceError(
                 f"Local Newton iteration did not converge: R={residual:.3e}, "
                 f"tolerance={residual_tolerance:.3e}"
             )
 
         return dgamma
 
-    def radial_return_map(
+    def radial_return_map_with_data(
             self,
             sigma_trial: stress,
             plastic_strain_n: strain,
@@ -233,7 +268,7 @@ class vonMisesModel(abstractMaterialEvaluate):
             tol: float = 1.0e-10,
             *,
             rtol: float = 1.0e-12,
-    ) -> tuple[stress, strain, stress, float, float]: 
+    ) -> tuple[ReturnMapValues, ReturnMapData]: 
         """
         Perform return map integration if yield function is
         evaluated positive. The return map evaluation is point-wise.
@@ -246,7 +281,7 @@ class vonMisesModel(abstractMaterialEvaluate):
         s_trial: stress = sigma_trial.deviatoric()
         xi_trial: stress = s_trial - backstress_n.deviatoric()
 
-        xi_trial_norm = np.sqrt(xi_trial.inner(xi_trial))
+        xi_trial_norm = float(np.sqrt(xi_trial.inner(xi_trial)))
 
         dgamma = self.consistency_parameter(
             xi_trial_norm=xi_trial_norm,
@@ -260,13 +295,28 @@ class vonMisesModel(abstractMaterialEvaluate):
         )
 
         if dgamma == 0.0:
-            return (
+            values: ReturnMapValues = (
                 sigma_trial,
                 plastic_strain_n,
                 backstress_n,
                 alpha_n,
                 dgamma,
             )
+
+            data = ReturnMapData(
+                dgamma=dgamma,
+                trial_norm=xi_trial_norm,
+                flow_direction=None,
+            )
+
+            return values, data
+#            return (
+#                sigma_trial,
+#                plastic_strain_n,
+#                backstress_n,
+#                alpha_n,
+#                dgamma,
+#            )
 
         direction = xi_trial / xi_trial_norm
         c = np.sqrt(2.0 / 3.0)
@@ -282,7 +332,46 @@ class vonMisesModel(abstractMaterialEvaluate):
         )
         backstress = backstress_n + c * (H - H_n) * direction
 
-        return sigma, plastic_strain, backstress, alpha, dgamma
+        direction_values = direction.to_numpy(copy=False)
+        direction_values.setflags(write=False)
+
+        data = ReturnMapData(
+            dgamma=dgamma,
+            trial_norm=xi_trial_norm,
+            flow_direction=direction_values,
+        )
+
+        return (sigma, plastic_strain, backstress, alpha, dgamma), data
+
+    # A compatibality wrapper
+    def radial_return_map(
+        self,
+        sigma_trial: stress,
+        plastic_strain_n: strain,
+        backstress_n: stress,
+        alpha_n: float,
+        material: _materialProperty,
+        K_law: ScalarHardeningLaw,
+        H_law: ScalarHardeningLaw,
+        parameters: HardeningParameters,
+        tol: float = 1.0e-10,
+        *,
+        rtol: float = 1.0e-12,
+    ) -> ReturnMapValues:
+        """Return updated material fields using the existing interface."""
+        values, _ = self.radial_return_map_with_data(
+            sigma_trial=sigma_trial,
+            plastic_strain_n=plastic_strain_n,
+            backstress_n=backstress_n,
+            alpha_n=alpha_n,
+            material=material,
+            K_law=K_law,
+            H_law=H_law,
+            parameters=parameters,
+            tol=tol,
+            rtol=rtol,
+        )
+        return values
 
     def consistent_tangent(
         self,
@@ -294,6 +383,8 @@ class vonMisesModel(abstractMaterialEvaluate):
         K_law: ScalarHardeningLaw,
         H_law: ScalarHardeningLaw,
         parameters: HardeningParameters,
+        *,
+        return_map_data: ReturnMapData | None = None,
     ) -> Tensor:
         """Full 3D derivative of radial_return_map on its selected smooth branch.
 
@@ -312,11 +403,14 @@ class vonMisesModel(abstractMaterialEvaluate):
         selects the branch actually returned by the local solver. Components are
         unscaled tensor entries, not engineering shear or Mandel coordinates.
         """
+        if return_map_data is not None:
+            dgamma = return_map_data.dgamma
+
         if not np.isfinite(alpha) or alpha < 0 or not np.isfinite(dgamma) or dgamma < 0:
             raise ValueError("Tangent alpha and dgamma must be finite and nonnegative.")
         for value in (sigma_trial.to_numpy(copy=False), backstress_n.to_numpy(copy=False)):
             if (value.shape != (3, 3) or not np.all(np.isfinite(value))
-                    or not np.allclose(value, value.T, rtol=1e-10, atol=1e-14)):
+                    or not close_to_transpose(value, rtol=1e-10, atol=1e-14)):
                 raise ValueError("Tangent requires finite symmetric 3D stresses.")
         mu, bulk = material.isotropic_shear_modulus, material.bulk_modulus
         if not np.isfinite(mu) or not np.isfinite(bulk) or mu <= 0 or bulk <= 0:
@@ -324,23 +418,38 @@ class vonMisesModel(abstractMaterialEvaluate):
         elastic = material.elastic_tensor
         if dgamma == 0.0:
             return elastic
-        shifted = (sigma_trial.deviatoric() - backstress_n.deviatoric()).to_numpy()
-        q = float(np.linalg.norm(shifted))
-        if not np.isfinite(q) or q <= 0:
-            raise ValueError("Plastic tangent requires a nonzero shifted trial stress.")
+
+        if return_map_data is None:
+            shifted = (
+                sigma_trial.deviatoric() - backstress_n.deviatoric()
+            ).to_numpy()
+            q = float(np.linalg.norm(shifted))
+            if not np.isfinite(q) or q <= 0:
+                raise ValueError("Plastic tangent requires a nonzero shifted trial stress.")
+
+            direction = shifted / q
+        else:
+            q = return_map_data.trial_norm
+            cached_direction = return_map_data.flow_direction
+
+            if not np.isfinite(q) or q<=0 or cached_direction is None:
+                raise ValueError(
+                    "Plastic return-map data requires a positive finite"
+                    "trial norm and a flow direction"
+                )
+
+            direction = cached_direction
+
         _, K_prime = K_law(alpha, parameters)
         _, H_prime = H_law(alpha, parameters)
         denominator = 2 * mu + (2 / 3) * (K_prime + H_prime)
         if not np.isfinite(denominator) or denominator <= 0:
             raise ValueError("Plastic tangent requires a finite positive consistency denominator.")
-        identity = np.eye(3)
-        deviatoric = 0.5 * (
-            np.einsum("ik,jl->ijkl", identity, identity)
-            + np.einsum("il,jk->ijkl", identity, identity)
-        ) - np.einsum("ij,kl->ijkl", identity, identity) / 3
-        direction = shifted / q
+
+        projector = deviatoric_projector(3)
+
         correction = 4 * mu**2 * (
-            (dgamma / q) * deviatoric
+            (dgamma / q) * projector
             + (1 / denominator - dgamma / q)
             * np.einsum("ij,kl->ijkl", direction, direction)
         )

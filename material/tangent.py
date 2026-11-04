@@ -7,7 +7,7 @@ from numpy.typing import NDArray
 
 from material.material_state import MaterialPoint, MaterialState
 from material.tensor import strain, stress
-
+from material.J2 import ReturnMapData
 
 def _validate_dimension(dim: int) -> None:
     if isinstance(dim, bool) or not isinstance(dim, (int, np.integer)) or dim not in (2, 3):
@@ -78,10 +78,12 @@ def finite_difference_material_tangent(
 def analytical_material_tangent(
     point: MaterialPoint,
     committed: MaterialState,
-    strain_increment: NDArray[np.float64],
+    strain_increment: NDArray[np.float64] | None = None,
     *,
     dim: int = 2,
     returned: MaterialState | None = None,
+    elastic_predictor: NDArray[np.float64] | None = None,
+    return_map_data: ReturnMapData | None = None,
 ) -> NDArray[np.float64]:
     """Return exact J2 d sigma[i,j]/d G[k,l], with shape (3,3,dim,dim).
 
@@ -95,24 +97,62 @@ def analytical_material_tangent(
     Both shear columns act on sym(delta_G), with no engineering-shear factor.
     Out-of-plane stress rows are retained. At a yield switch use the branch
     selected by the return map, rather than claiming a unique smooth derivative.
+
+    strain_increment may be omitted but returned both cached 
+    returned and elastic_predictor.
     """
     _validate_dimension(dim)
-    increment = np.asarray(strain_increment, dtype=np.float64)
-    if (increment.shape != (3, 3) or not np.all(np.isfinite(increment))
-            or not np.allclose(increment, increment.T, rtol=1e-10, atol=1e-14)):
-        raise ValueError("Expected a finite symmetric strain increment with shape (3, 3).")
-    if returned is None:
-        local = MaterialPoint(
-            point.material, point.parameters, point.model, point.K_law, point.H_law,
-            committed=committed,
-        )
-        returned, _ = local.update(strain(increment))
+
+    if strain_increment is None:
+        if returned is None or elastic_predictor is None:
+            raise ValueError(
+                "Omitting strain_increment requires both returned and elastic_predictor."
+            )
+    else:
+        increment = np.asarray(strain_increment, dtype=np.float64)
+        if (
+            increment.shape != (3, 3) 
+            or not np.all(np.isfinite(increment))
+            or not np.allclose(
+                increment, increment.T, rtol=1e-10, atol=1e-14
+            )
+        ):
+            raise ValueError("Expected a finite symmetric strain increment with shape (3, 3).")
+
+        if returned is None:
+            returned, predictor_tensor, return_map_data = (
+                point.evaluate_from_with_data(
+                    committed, strain(increment)
+                )
+            )
+            if elastic_predictor is None:
+                elastic_predictor = predictor_tensor.to_numpy(copy=False)
+
+        if elastic_predictor is None:
+            elastic = point.material.elastic_tensor.to_numpy(copy=False)
+            elastic_predictor = (
+                committed.stress.to_numpy(copy=False)
+                + np.einsum("ijkl,kl->ij", elastic, increment)
+            )
+
     # Recover the multiplier in THIS implementation's unit-flow convention.
-    dgamma = (returned.alpha - committed.alpha) / np.sqrt(2 / 3)
-    elastic = point.material.elastic_tensor.to_numpy(copy=False)
-    predictor = committed.stress.to_numpy() + np.einsum("ijkl,kl->ij", elastic, increment)
+    dgamma = (
+        return_map_data.dgamma
+        if return_map_data is not None
+        else float(
+            (returned.alpha - committed.alpha) / np.sqrt(2 / 3)
+        )
+    )
+
     tangent = point.model.consistent_tangent(
-        stress(predictor), committed.backstress, returned.alpha, float(dgamma),
-        point.material, point.K_law, point.H_law, point.parameters,
+        stress(elastic_predictor), 
+        committed.backstress, 
+        returned.alpha, 
+        float(dgamma),
+        point.material, 
+        point.K_law, 
+        point.H_law, 
+        point.parameters,
+        return_map_data=return_map_data,
     )
     return tangent.to_numpy()[:, :, :dim, :dim]

@@ -9,7 +9,8 @@ import scipy.sparse as sps  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from alternatives import newton
-from utils.newton_utils import NewtonConvergenceError
+from utils import newton_utils
+from utils.newton_utils import NewtonConvergenceError, NewtonDivergenceError
 from alternatives.newton import solve_newton
 from alternatives.plane_strain import PlaneStrainTpsa
 from alternatives.original.residual import TpsaOperators, TpsaResidual, evaluate_global_residual
@@ -297,8 +298,9 @@ def test_nonfinite_linear_correction_is_rejected(setup: Setup, monkeypatch: pyte
         def solve(self, rhs: FloatArray) -> FloatArray:
             return np.full_like(rhs, np.inf)
 
-    monkeypatch.setattr(sps.linalg, "splu", lambda matrix: BadFactor())
-    with pytest.raises(RuntimeError, match="non-finite.*correction"):
+    backend = newton_utils.umfpack if newton_utils.umfpack is not None else sps.linalg
+    monkeypatch.setattr(backend, "splu", lambda matrix: BadFactor())
+    with pytest.raises(NewtonDivergenceError, match="non-finite.*correction"):
         solve_newton(
             operators, transfer, case.material_points, committed, case.bc_values,
             lambda x, evaluation: operators.A,

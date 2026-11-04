@@ -11,7 +11,7 @@ unless `output_dir` is supplied. Their CLIs export to `results/` unless passed
 
 ## Common material and boundary setup
 
-The examples use a unit square with both displacement components prescribed on
+The unit-square examples use both displacement components prescribed on
 all boundary faces, zero body force and initially zero material history.
 This is **plane strain**: total `epsilon_zz`, `epsilon_xz` and `epsilon_yz` are
 zero, while stress and plastic histories retain all 3D components.
@@ -195,3 +195,58 @@ The displacement PNG helper is available separately in the [output guide](visual
 The animation visualizes the **local** J2 return-map iteration, not global
 Newton convergence. Consult `--help` for preview and output options; saving
 video requires FFmpeg.
+## Textbook strip footing (prototype)
+
+Run `python -B -m examples.strip_footing_example` from the repository root.
+Use `--cells-under-footing 12` to refine the half-footing, `--steps 28` for more
+target settlements, or `--no-export` for numerical checks without output files.
+The default output directory is `results/prototype_strip_footing/`; all files
+identify the prototype solver and analytical Jacobian.
+
+This reproduces Section 7.5.4 of *Computational Methods for Plasticity*
+(de Souza Neto, Peric and Owen, 2008), printed pp. 252--255 (PDF pages 277--280).
+The half-domain is 5 m wide and 5 m deep. Soil is weightless, plane strain,
+von Mises perfectly plastic: E=10^7 kPa, nu=0.48, sigma_y=848.7 kPa.
+There is no isotropic or kinematic hardening.
+
+With x in [0,5] and y in [-5,0], both vertical sides impose ux=0 and ty=0;
+the bottom imposes uy=0 and tx=0. On the top, 0<x<0.5 is a smooth rigid footing:
+uy=-u and tx=0, with ux free. The remaining top is traction free. Settlement
+reaches u=0.002 m through 14 uniform target increments by default, with adaptive
+cutbacks if necessary. The book specifies the endpoint and increment count but
+does not list its complete load sequence.
+
+Pressure is computed from numerical footing reactions as P=R_half/(B/2), B=1 m.
+The response plot includes the slip-line reference P/c=2+pi, where c=sigma_y/sqrt(3).
+The mesh is an orthogonal graded rectangular TPSA mesh, not the book's 135
+quadratic finite elements. The summary reports the difference from the limit;
+convergence of Newton alone does not establish mesh accuracy. PNG setup,
+response, final fields, plastic zones, CSV, and final-state VTK/PVD are exported.
+
+### Coupled alternatives comparison
+
+Run `python -B -m examples.strip_footing_alternatives` to repeat this benchmark
+using `alternatives/coupled/`. It reuses the benchmark geometry, material and
+plotting code, but assembles PorePy's TPSA reference matrix and solves for
+`[u, r, p, epsilon_M]` using the alternatives analytical Jacobian and load
+controller. It does not use the prototype nonlinear solver or `core/`.
+
+The material, component boundary conditions, mesh and settlement targets are
+identical. The coupled maps now eliminate the displacement on traction-prescribed
+components, including its plastic correction; prescribed tractions remain exact.
+Dirichlet components retain their reactions. Boundary values follow PorePy:
+displacement on Dirichlet components, outward integrated force on Neumann ones.
+The original formulation remains restricted to full Dirichlet conditions.
+
+The same mesh/loading CLI options are available. Results are written to
+`results/alternatives_strip_footing/` with prefix
+`alternatives_strip_footing_coupled_analytical`. Its fourth residual column is
+`R_strain`, the strain constraint; the prototype's fourth column is `R_face`.
+Coupled Newton takes full steps, while the prototype benchmark uses backtracking;
+both permit adaptive load cutbacks. Iteration counts therefore need this context.
+
+For the default 324-cell mesh and 14 targets, both runs give final
+`P/c = 6.053355`, about 17.73% above the analytical limit. The coupled run has
+2268 unknowns, converges without cutbacks and uses 85 Newton corrections.
+The saved prototype run has 2664 unknowns and uses 123 corrections. Agreement
+between these formulations is a consistency check, not a mesh-accuracy result.

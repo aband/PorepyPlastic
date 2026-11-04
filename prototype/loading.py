@@ -57,7 +57,7 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
 
     State and loads are copied. MaterialPoint slots remain untouched. Reuse
     utils.load_schedule.AdaptiveLoadOptions with inherited run/iter_adaptive/
-    run_adaptive; only NewtonConvergenceError triggers adaptive cutback.
+    run_adaptive.
     Geometry, side ordering, elasticity, and material parameters must remain fixed.
     """
 
@@ -90,11 +90,11 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
         if line_search is not None and not isinstance(line_search, BacktrackingOptions):
             raise ValueError("line_search must be BacktrackingOptions or None.")
         values = np.asarray(reference_bc_values, dtype=np.float64)
-        bf = operators.dirichlet_faces
-        if values.shape != (nd, nf) or not np.all(np.isfinite(values[:, bf])):
+        mask = operators.dirichlet_mask
+        if values.shape != (nd, nf) or not np.all(np.isfinite(values[mask])):
             raise ValueError(f"Expected reference_bc_values ({nd}, {nf}), finite on boundary faces.")
         boundary = np.zeros((nd, nf))
-        boundary[:, bf] = values[:, bf]
+        boundary[mask] = values[mask]
         body = np.zeros((nd, nc)) if reference_body_force is None else np.array(
             reference_body_force, dtype=np.float64, copy=True,
         )
@@ -104,6 +104,8 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
                    else np.array(reference_neumann, dtype=np.float64, copy=True))
         if neumann.shape != (nd, operators.neumann_faces.size) or not np.all(np.isfinite(neumann)):
             raise ValueError("Expected finite reference_neumann (dim, num_neumann_faces).")
+        if np.any(neumann[operators.dirichlet_mask[:, operators.neumann_faces]] != 0):
+            raise ValueError("Neumann loads must be zero on prescribed displacement components.")
         if not np.isfinite(initial_load_factor):
             raise ValueError("initial_load_factor must be finite.")
         with np.errstate(over="raise", invalid="raise"):
@@ -171,7 +173,7 @@ class LoadStepController(_LoadStepSchedule[RetainedLoadStepResult]):
                     result.z, boundary, old.tpsa.bc_values,
                 )
                 side = old.side_traction + evaluation.traction_increment
-            faces[:, ops.dirichlet_faces] = boundary[:, ops.dirichlet_faces]
+            faces[ops.dirichlet_mask] = boundary[ops.dirichlet_mask]
             material = evaluation.material_trial
             tpsa = SpatialTpsaState(x, boundary, material.epsilon, material.material_states,
                              old.tpsa.traction, face_displacement=faces)

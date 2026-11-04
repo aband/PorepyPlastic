@@ -92,6 +92,9 @@ def assemble_global_residual(
         R_p,i = sum_k A_k*(d_k . n_ki) - (V_i/lam_i)*delta_p_i,
         R_f,k = delta_t_ki + delta_t_kj  (interior),
         R_f,k = delta_t_ki - prescribed_delta_t_k  (Neumann boundary).
+    Prescribed components on mixed boundary faces instead have the exact equation
+    (A*2*mu/distance)*(d_component - target_increment) = 0. Its weight gives the
+    displacement equation force units; it is a row replacement, not a penalty.
     In 2D, d x n = d_x*n_y - d_y*n_x. Tractions are already outward and
     integrated: no additional incidence signs or face areas multiply them.
 
@@ -108,7 +111,7 @@ def assemble_global_residual(
     Omitting committed_residual assumes an equilibrated previous step. Supply
     its known unscaled residual (num_dofs,) to add that imbalance once; it must
     use the same geometry, ordering, and sign convention. Dirichlet reactions
-    enter cell momentum sums but have no face-balance equations.
+    enter cell momentum sums but have no traction-balance equations.
 
     Plastic corrections enter through supplied tractions only; no correction
     is subtracted again in either auxiliary block. This function does not
@@ -162,8 +165,15 @@ def assemble_global_residual(
             for component in range(nd)
         ], dtype=np.float64)
         if neumann_increment is not None:
+            if np.any(neumann_increment[operators.dirichlet_mask[:, operators.neumann_faces]] != 0):
+                raise ValueError("Neumann increments must be zero on prescribed displacement components.")
             face_balance[:, operators.neumann_faces] -= neumann_increment
         result[operators.face_slice] = face_balance[:, operators.free_faces].ravel(order="F")
+        components, constrained_faces = operators.constraint_components, operators.constraint_faces
+        result[operators.constraint_dofs] = operators.constraint_weights * (
+            z[operators.constraint_dofs]
+            - (bc_values[components, constrained_faces] - committed_bc_values[components, constrained_faces])
+        )
         if committed_residual is not None:
             result += committed_residual
     if not np.all(np.isfinite(result)):
@@ -249,5 +259,5 @@ def evaluate_global_residual(
         committed_residual=committed_residual,
     )
     boundary = np.zeros((operators.dim, operators.num_faces))
-    boundary[:, operators.dirichlet_faces] = bc_values[:, operators.dirichlet_faces]
+    boundary[operators.dirichlet_mask] = bc_values[operators.dirichlet_mask]
     return RetainedFaceResidual(residual, material_trial, traction, z.copy(), boundary)

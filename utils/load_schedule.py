@@ -10,8 +10,13 @@ from typing import Generic, Protocol, TypeVar
 import numpy as np
 from numpy.typing import NDArray
 
-from utils.newton_utils import NewtonConvergenceError
+from material.J2 import ReturnMapConvergenceError
+from utils.newton_utils import StepFailure
 
+# Failures a smaller load increment may resolve. Finite-difference tangents run
+# the return map outside the residual's material loop, so its local failure can
+# reach the controller unwrapped.
+_RECOVERABLE = (StepFailure, ReturnMapConvergenceError)
 
 class LoadStepError(RuntimeError):
     """A target failed; inspect the controller for its last accepted state/steps.
@@ -134,8 +139,10 @@ class _LoadStepSchedule(ABC, Generic[_Step]):
         Validate the complete path before the first solve. Reach every target
         exactly without overshoot; repeated targets are skipped. Increment
         magnitudes carry across targets, resetting to initial_increment when
-        direction reverses. Only NewtonConvergenceError triggers cutback/retry.
-        Other errors propagate immediately through advance's LoadStepError.
+        direction reverses. Only recoverable causes trigger cutback/retry:
+        StepFailure (Newton non-convergence or divergence, wrapped local failure)
+        and ReturnMapConvergenceError. Other errors propagate immediately through
+        advance's LoadStepError.
 
         Grow when iterations <= target_iterations, except immediately after a
         cutback; otherwise keep the increment. A clipped endpoint does not shrink
@@ -179,7 +186,7 @@ class _LoadStepSchedule(ABC, Generic[_Step]):
                 try:
                     record = self.advance(candidate)
                 except LoadStepError as error:
-                    if not isinstance(error.__cause__, NewtonConvergenceError):
+                    if not isinstance(error.__cause__, _RECOVERABLE):
                         raise
                     attempted_increment = abs(candidate - start)
                     if attempted_increment <= settings.min_increment:

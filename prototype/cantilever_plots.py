@@ -36,7 +36,8 @@ def export_results(main: CantileverResult, study: list[CantileverResult], folder
     paper_A, paper_B = float(reference[10, 2]), float(reference[30, 2])
     case, response = main.case, main.response
     q = (len(response) - 1) // 4
-    grading_label = "Both ends" if case.grading == "both-ends" else "Clamp only"
+    grading_label = ("Uniform" if case.grading_ratio == 1. else
+                     "Both ends" if case.grading == "both-ends" else "Clamp only")
 
     def mesh_label(grading: str, ratio: float) -> str:
         if ratio == 1.:
@@ -82,7 +83,11 @@ def export_results(main: CantileverResult, study: list[CantileverResult], folder
     axes = fig.subplots(2, 1)
     for ax, xs, title in zip(axes, (np.linspace(0., 100., case.shape[0] + 1), case.axes[0]),
                               ("Uniform x spacing", f"{grading_label}: largest/smallest cell width = {case.grading_ratio:g}"), strict=True):
-        for x in xs: ax.plot([x, x], [-.5, .5], color="#3d5c6b", lw=.7)
+        stride = max(1, int(np.ceil(case.shape[0] / 150)))
+        shown = np.unique(np.r_[xs[::stride], xs[-1]])
+        for x in shown: ax.plot([x, x], [-.5, .5], color="#3d5c6b", lw=.7)
+        if stride > 1:
+            title += f" (every {stride}th axial line shown)"
         for z in case.axes[2]: ax.plot([0., 100.], [z, z], color="#3d5c6b", lw=.7)
         ax.set(xlim=(0, 100), ylim=(-.5, .5), xlabel="x [mm]", ylabel="z [mm]", title=title)
     fig.suptitle(f"Mesh strategies — x–z view, {case.shape[1]} cells across width (z axis stretched)")
@@ -172,7 +177,8 @@ def export_results(main: CantileverResult, study: list[CantileverResult], folder
     order = np.argsort([np.mean(p @ depth) for p in projected])
     fig = _figure(10., 3.5); ax = fig.subplots()
     ax.add_collection(PolyCollection([projected[i] @ projection for i in order],
-        facecolors=[colours[i] for i in order], edgecolors="#333333", linewidths=.15))
+        facecolors=[colours[i] for i in order],
+        edgecolors="none" if grid.num_cells > 10000 else "#333333", linewidths=.15))
     ax.autoscale_view(); ax.margins(.05); ax.set_aspect("equal"); ax.set_axis_off()
     from matplotlib.cm import ScalarMappable
     fig.colorbar(ScalarMappable(norm=norm, cmap="viridis"), ax=ax, shrink=.65, label="von Mises stress [MPa]", pad=.02)

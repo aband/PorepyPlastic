@@ -18,10 +18,13 @@ class RetainedFaceOperators:
     z = [delta_u(nd*nc), delta_r(nr*nc), delta_p(nc), d_free(nd*n_free)],
     with nr=1 in 2D and nr=3 in 3D. Vector
     components are interleaved by cell/face, as in PorePy (order="F"). The
-    free faces are the interior and Neumann faces, sorted by PorePy face number. Prescribed
-    boundary faces have no Newton DOFs; their increments are target minus old
-    boundary displacement. All entries in z are increments from the committed
-    load step, not absolute fields or corrections from the previous iteration.
+    free faces are interior faces and boundary faces with any Neumann component.
+    Fully prescribed faces have no Newton DOFs. Mixed boundary faces retain all
+    components; prescribed components satisfy exact displacement equations, scaled
+    by A*2*mu/d to retain force units. Tangential Neumann components remain free.
+    Boundary conditions use global Cartesian components. All entries in z are
+    increments from the committed load step, not absolute fields or corrections
+    from the previous iteration.
 
     Strain is evaluated from the face increments, independently of z's cell
     fields and material state. Supply a positive scalar or cellwise mu to build
@@ -61,10 +64,16 @@ class RetainedFaceOperators:
         boundary = np.asarray(grid.get_all_boundary_faces(), dtype=np.int64)
         if bc.dim != nd or bc.is_dir.shape != (nd, nf):
             raise ValueError("Boundary conditions must match the grid dimension and faces.")
-        is_dir = np.all(bc.is_dir[:, boundary] & ~bc.is_neu[:, boundary], axis=0)
-        is_neu = np.all(bc.is_neu[:, boundary] & ~bc.is_dir[:, boundary], axis=0)
-        if np.any(bc.is_rob[:, boundary]) or not np.all(is_dir | is_neu):
-            raise ValueError("Expected full-vector Dirichlet or Neumann boundary conditions.")
+        component_dir = bc.is_dir[:, boundary] & ~bc.is_neu[:, boundary]
+        component_neu = bc.is_neu[:, boundary] & ~bc.is_dir[:, boundary]
+        if np.any(bc.is_rob[:, boundary]) or not np.all(component_dir | component_neu):
+            raise ValueError("Expected Dirichlet or Neumann conditions for each component.")
+        is_dir = np.all(component_dir, axis=0)
+        is_neu = np.any(component_neu, axis=0)
+        if np.any(np.any(component_dir, axis=0) & is_neu) and not np.allclose(
+            bc.basis[:, :, boundary], np.eye(nd)[:, :, None], rtol=0, atol=1e-14,
+        ):
+            raise ValueError("Component boundary conditions require the global Cartesian basis.")
         dirichlet = np.sort(boundary[is_dir])
         neumann = np.sort(boundary[is_neu])
         interior = np.setdiff1d(np.arange(nf, dtype=np.int64), boundary)
@@ -87,6 +96,8 @@ class RetainedFaceOperators:
         self.num_cells, self.num_faces = nc, nf
         self.boundary_faces = boundary.copy()
         self.dirichlet_faces = dirichlet
+        self.dirichlet_mask = np.zeros((nd, nf), dtype=bool)
+        self.dirichlet_mask[:, boundary] = component_dir
         self.neumann_faces = neumann
         self.neumann_positions = np.searchsorted(free, neumann)
         self.free_faces = free
@@ -102,6 +113,13 @@ class RetainedFaceOperators:
         self.face_dofs[:, free] = np.arange(self.cell_size, self.num_dofs, dtype=np.int64).reshape(
             (self.dim, self.num_free_faces), order="F",
         )
+        # Mixed boundary faces retain every component in the existing face layout.
+        # Their prescribed components get displacement equations, not traction balance.
+        self.constraint_components, self.constraint_faces = np.nonzero(
+            self.dirichlet_mask & (self.face_dofs >= 0)
+        )
+        self.constraint_dofs = self.face_dofs[self.constraint_components, self.constraint_faces]
+        self.constraint_weights = np.ones(self.constraint_dofs.size)
 
         self.side_faces = np.repeat(np.arange(nf, dtype=np.int64), neighbors)
         self.side_cells = np.array(incidence.indices, dtype=np.int64, copy=True)
@@ -179,6 +197,8 @@ class RetainedFaceOperators:
         self.mu = values
         self.rotation_accumulation = self._cell_accumulation(values)
         self.side_stiffness = stiffness
+        sides = np.searchsorted(self.side_faces, self.constraint_faces)
+        self.constraint_weights = self.side_areas[sides] * stiffness[sides]
         self.rotation_transfer = CellToFaceTransfer(self.grid, matrix)
 
     def pack(
@@ -204,12 +224,14 @@ class RetainedFaceOperators:
         """Form d (dim,nf), inserting target-minus-committed Dirichlet values.
 
         Both boundary arrays have shape (dim,nf) and hold absolute displacements.
-        Only their boundary entries are used; unused interior entries may be NaN.
+        Fully prescribed faces are inserted here; mixed faces use the retained
+        components in z and satisfy displacement equations in the residual.
+        Only prescribed entries are read; unused entries may be NaN.
         """
         self._validate_unknowns(z)
         bf = self.dirichlet_faces
         for name, values in (("bc_values", bc_values), ("committed_bc_values", committed_bc_values)):
-            if values.shape != (self.dim, self.num_faces) or not np.all(np.isfinite(values[:, bf])):
+            if values.shape != (self.dim, self.num_faces) or not np.all(np.isfinite(values[self.dirichlet_mask])):
                 raise ValueError(f"Expected {name} ({self.dim}, {self.num_faces}), finite on boundary faces.")
         d = np.zeros((self.dim, self.num_faces))
         d[:, self.free_faces] = z[self.face_slice].reshape((self.dim, self.num_free_faces), order="F")

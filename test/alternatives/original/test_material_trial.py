@@ -324,7 +324,7 @@ def test_local_failure_propagates_without_partial_commit(
         raise RuntimeError("Injected local return-map failure")
 
     # Fail after at least one successful cell update to expose partial commits.
-    monkeypatch.setattr(case.material_points[1].model, "radial_return_map", fail)
+    monkeypatch.setattr(case.material_points[1].model, "radial_return_map_with_data", fail)
     with pytest.raises(RuntimeError, match="Injected local return-map failure"):
         evaluate(operators, case.material_points, committed, x, bc_values)
     assert_unchanged(committed, saved)

@@ -65,10 +65,10 @@ class RetainedState:
         state = SpatialTpsaState(tpsa.x, tpsa.bc_values, tpsa.epsilon, tpsa.material_states,
                           oriented, face_displacement=tpsa.face_displacement)
         assert state.face_displacement is not None
-        bf = operators.dirichlet_faces
-        if not np.allclose(state.face_displacement[:, bf], state.bc_values[:, bf], rtol=1e-10, atol=1e-12):
+        mask = operators.dirichlet_mask
+        if not np.allclose(state.face_displacement[mask], state.bc_values[mask], rtol=1e-10, atol=1e-12):
             raise ValueError("Total face displacement must match the committed Dirichlet data.")
-        state.bc_values[:, operators.free_faces] = 0.0
+        state.bc_values[~mask] = 0.0
         total = operators.pack(state.x, state.face_displacement[:, operators.free_faces])
         reconstructed = operators.strain_increment(total, state.bc_values, np.zeros((nd, nf)))
         if not np.allclose(state.epsilon, reconstructed, rtol=1e-8, atol=1e-10):

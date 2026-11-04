@@ -104,6 +104,10 @@ class RetainedAnalyticalJacobian:
                 auxiliary[ops.p_slice.start + cell, face_cols] = (area * normal)[None, :]
                 sums[face_cols, side_rows] = identity
         auxiliary.setdiag(np.r_[np.zeros(nd * nc), -np.repeat(ar, nr), -ap, np.zeros(nd * ops.num_free_faces)])
+        # Replace only prescribed mixed-face balance rows. Keep their columns in
+        # B and T: these face components still determine strain and reactions.
+        sums[ops.constraint_dofs, :] = 0.0
+        auxiliary[ops.constraint_dofs, ops.constraint_dofs] = ops.constraint_weights
         balance = sums.tocsr()
         self.B, self.T, self.P_side = B.tocsr(), T.tocsr(), P_side.tocsr()
         self.L = sps.csr_array(balance @ self.T + auxiliary.tocsr())

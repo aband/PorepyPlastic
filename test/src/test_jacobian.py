@@ -12,10 +12,12 @@ import porepy as pp
 import pytest
 import scipy.sparse as sps
 
+import core.material as core_material
 from core.jacobian import AnalyticalJacobian
 from core.layout import FloatArray
+from core.material import CellMaterial
 from core.residual import LoadIncrement, ResidualAssembler, ResidualEvaluation
-from core.state import MaterialHistory
+from core.state import MaterialHistory, MaterialTrial
 from material.J2 import _materialProperty, vonMisesModel
 from material.material_state import MaterialPoint, MaterialState
 from material.scalar_hardening import (
@@ -23,7 +25,6 @@ from material.scalar_hardening import (
 )
 from material.tangent import analytical_material_tangent
 from material.tensor import strain
-from utils.material_evaluation import MaterialTrial, evaluate_material_at_strain
 from utils.reconstruction import mandel
 
 
@@ -176,7 +177,7 @@ def test_eliminating_free_faces_recovers_tpsa_matrix_and_loads(jacobian: Analyti
     inverse = sps.diags_array(1.0 / diagonal, format="csr")
     reduced = L[:nx, :nx] - L[:nx, nx:] @ inverse @ L[nx:, :nx]
     np.testing.assert_allclose(
-        reduced.toarray(), assembler.elastic.matrices.cell_matrix.toarray(), rtol=1e-12, atol=1e-12,
+        reduced.toarray(), assembler.elastic.matrices.cell_matrix.toarray(), rtol=1e-14, atol=1e-14,
     )
 
     loads = _loads(assembler)
@@ -186,7 +187,7 @@ def test_eliminating_free_faces_recovers_tpsa_matrix_and_loads(jacobian: Analyti
     boundary[:, layout.dirichlet_faces] = loads.dirichlet_increment
     boundary[:, assembler.neumann_faces] = loads.neumann_increment
     expected = -assembler.elastic.boundary_rhs(boundary.ravel(order="F")) - loads.cell_source_increment
-    np.testing.assert_allclose(reduced_offset, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(reduced_offset, expected, rtol=1e-14, atol=1e-14)
 
 
 @pytest.mark.parametrize("dim", [2, 3], ids=["2d", "3d"])
@@ -238,6 +239,7 @@ def test_construction_reuses_cached_operators_and_preserves_them(
         monkeypatch.setattr(operators, name, unexpected_rebuild)
     monkeypatch.setattr(assembler.elastic, "_assemble_matrices", unexpected_rebuild)
     monkeypatch.setattr(MaterialPoint, "update", unexpected_rebuild)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", unexpected_rebuild)
     rebuilt = AnalyticalJacobian(assembler)
     np.testing.assert_array_equal(operators.B_free.toarray(), saved_B.toarray())
     np.testing.assert_array_equal(assembler.accumulation.toarray(), saved_accum.toarray())
@@ -265,14 +267,13 @@ def test_nonfinite_auxiliary_matrix_is_rejected(grid: pp.Grid, value: float) -> 
 def _material_trial(
     jacobian: AnalyticalJacobian, regime: str,
 ) -> tuple[MaterialHistory, MaterialTrial]:
-    layout, points = jacobian.layout, jacobian.assembler.material_points
+    layout, material = jacobian.layout, jacobian.assembler.material
     nd, nc = layout.dim, layout.num_cells
     old = MaterialHistory.zeros(layout)
     scale = 1.0 + 0.1 * np.arange(nc)
     if regime in ("reloading", "unloading"):
         preload = np.diag([0.02, -0.005, -0.003 if nd == 3 else 0.0])[:, :, None] * scale
-        previous = evaluate_material_at_strain(layout, points, old, preload, dim=nd)
-        old = MaterialHistory(nd, previous.epsilon, previous.material_states)
+        old = material.evaluate(old, preload).history
 
     direction = np.array([[1.0, -0.2, 0.25], [-0.2, 0.1, 0.15], [0.25, 0.15, -0.1]])
     if nd == 2:
@@ -284,8 +285,7 @@ def _material_trial(
         increment[:, :, ::2] *= 0.001
     elif regime == "unloading":
         increment = -0.01 * old.epsilon
-    trial = evaluate_material_at_strain(layout, points, old, old.epsilon + increment, dim=nd)
-    return old, trial
+    return old, material.evaluate(old, increment)
 
 
 def _hooke(point: MaterialPoint, increment: FloatArray) -> FloatArray:
@@ -399,11 +399,6 @@ def test_material_blocks_match_full_tensor_actions(grid: pp.Grid, regime: str) -
                 np.testing.assert_allclose(
                     matrix @ mandel(variation, dim=nd), mandel(expected, dim=nd), atol=2e-12,
                 )
-                # Check the cached elastic projection using Hooke's law directly.
-                np.testing.assert_allclose(
-                    jacobian._elastic_mandel[cell] @ mandel(variation[:, :, cell:cell + 1], dim=nd),
-                    mandel(elastic[:, :, None], dim=nd), atol=2e-12,
-                )
     if not np.any(active):
         assert matrix.nnz == 0
         np.testing.assert_array_equal(
@@ -417,16 +412,14 @@ def test_material_tangent_reuses_trial_and_preserves_history_and_cache(
     jacobian = AnalyticalJacobian(_assembler(grid))
     old, trial = _material_trial(jacobian, "reloading")
     expected = jacobian._build_material_correction_tangent(old, trial)
-    unloading = evaluate_material_at_strain(
-        jacobian.layout, jacobian.assembler.material_points, old, 0.99 * old.epsilon, dim=grid.dim,
-    )
+    unloading = jacobian.assembler.material.evaluate(old, -0.01 * old.epsilon)
     old_before = old.copy()
     trial_before = [state.copy() for state in trial.material_states]
     epsilon_before, correction_before = trial.epsilon.copy(), trial.stress_correction.copy()
     basis_before = jacobian._mandel_basis.copy()
-    elastic_before = tuple(block.copy() for block in jacobian._elastic_mandel)
+    projector_before = jacobian._deviatoric_mandel.copy()
     for array in (old.epsilon, trial.epsilon, trial.stress_correction, jacobian._mandel_basis,
-                  *jacobian._elastic_mandel):
+                  jacobian._deviatoric_mandel):
         array.setflags(write=False)
 
     # Material-point slots deliberately differ from the supplied global history.
@@ -444,12 +437,14 @@ def test_material_tangent_reuses_trial_and_preserves_history_and_cache(
         pytest.fail("Material tangent assembly must reuse the matching returned state.")
 
     monkeypatch.setattr(MaterialPoint, "update", unexpected_update)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", unexpected_update)
+    monkeypatch.setattr(vonMisesModel, "radial_return_map_with_data", unexpected_update)
+    monkeypatch.setattr(core_material, "radial_return_batch", unexpected_update)
     actual = jacobian._build_material_correction_tangent(old, trial)
     assert jacobian._build_material_correction_tangent(old, unloading).nnz == 0
     np.testing.assert_array_equal(actual.toarray(), expected.toarray())
     np.testing.assert_array_equal(jacobian._mandel_basis, basis_before)
-    for cached, saved in zip(jacobian._elastic_mandel, elastic_before, strict=True):
-        np.testing.assert_array_equal(cached, saved)
+    np.testing.assert_array_equal(jacobian._deviatoric_mandel, projector_before)
     np.testing.assert_array_equal(old.epsilon, old_before.epsilon)
     np.testing.assert_array_equal(trial.epsilon, epsilon_before)
     np.testing.assert_array_equal(trial.stress_correction, correction_before)
@@ -474,13 +469,13 @@ def test_material_tangent_rejects_incompatible_history(grid: pp.Grid, invalid: s
         if invalid.startswith("committed"):
             old.epsilon = old.epsilon[:, :, :-1]
         else:
-            trial.epsilon = trial.epsilon[:, :, :-1]
+            trial.history.epsilon = trial.history.epsilon[:, :, :-1]
         message = "shape"
     else:
         if invalid.startswith("committed"):
-            old.material_states.pop()
+            old.alpha = old.alpha[:-1]
         else:
-            trial.material_states.pop()
+            trial.history.alpha = trial.history.alpha[:-1]
         message = "one committed and trial material state per cell"
     with pytest.raises(ValueError, match=message):
         jacobian._build_material_correction_tangent(old, trial)
@@ -489,8 +484,10 @@ def test_material_tangent_rejects_incompatible_history(grid: pp.Grid, invalid: s
 @pytest.mark.parametrize("value", [np.nan, np.inf])
 def test_nonfinite_material_correction_matrix_is_rejected(grid: pp.Grid, value: float) -> None:
     jacobian = AnalyticalJacobian(_assembler(grid))
-    old, trial = _material_trial(jacobian, "elastic")
-    jacobian._elastic_mandel[0][0, 0] = value
+    old, trial = _material_trial(jacobian, "plastic")
+    # Elastic cells skip the correction entirely; corrupt a block that is used.
+    assert trial.material_states[0].alpha > old.material_states[0].alpha
+    jacobian._deviatoric_mandel[0, 0] = value
     with pytest.raises(ValueError, match="Material correction tangent.*finite"):
         jacobian._build_material_correction_tangent(old, trial)
 
@@ -528,6 +525,8 @@ def _evaluated_candidate(
     elif regime == "mixed":
         for point in assembler.material_points[::2]:
             point.parameters.sigma_y = point.parameters.sigma_u = 100.0
+        # Hardening data is read once per assembler; refresh it after the change.
+        assembler.material = CellMaterial(assembler.material_points)
     elif regime in ("reloading", "unloading"):
         old, _ = _material_trial(jacobian, "reloading")
         if regime == "unloading":
@@ -628,10 +627,31 @@ def test_evaluate_rejects_missing_material_trial(grid: pp.Grid) -> None:
 
 
 @pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_nonfinite_elastic_jacobian_is_rejected_at_construction(
+    grid: pp.Grid, value: float, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assembler = _assembler(grid)
+    build_auxiliary = AnalyticalJacobian._build_auxiliary_matrix
+
+    def nonfinite_auxiliary(self: AnalyticalJacobian) -> sps.csr_array:
+        matrix = build_auxiliary(self)
+        matrix.data[0] = value
+        return matrix
+
+    # The elastic fast path trusts L after this one-time construction check.
+    monkeypatch.setattr(AnalyticalJacobian, "_build_auxiliary_matrix", nonfinite_auxiliary)
+    with pytest.raises(ValueError, match="Elastic Jacobian must remain finite"):
+        AnalyticalJacobian(assembler)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf])
 def test_evaluate_rejects_nonfinite_assembled_jacobian(grid: pp.Grid, value: float) -> None:
     jacobian = AnalyticalJacobian(_assembler(grid))
-    old, _, _, evaluation = _evaluated_candidate(jacobian, "elastic")
-    # Keep the material tangent valid to exercise the final assembly guard.
+    old, _, _, evaluation = _evaluated_candidate(jacobian, "plastic")
+    trial = evaluation.material_trial
+    assert trial is not None
+    assert jacobian._build_material_correction_tangent(old, trial).nnz > 0
+    # Exercise plastic assembly rather than returning the validated elastic cache.
     jacobian.L.data[0] = value
     with pytest.raises(ValueError, match="Analytical Jacobian must remain finite"):
         jacobian.evaluate(old, evaluation)
@@ -675,6 +695,9 @@ def test_evaluate_reuses_material_trial_and_returns_owned_matrix(
         pytest.fail("Public Jacobian evaluation must reuse the existing material trial.")
 
     monkeypatch.setattr(MaterialPoint, "update", unexpected_evaluation)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", unexpected_evaluation)
+    monkeypatch.setattr(vonMisesModel, "radial_return_map_with_data", unexpected_evaluation)
+    monkeypatch.setattr(core_material, "radial_return_batch", unexpected_evaluation)
     monkeypatch.setattr(assembler, "evaluate", unexpected_evaluation)
     monkeypatch.setattr(jacobian.operators, "green_gauss_reconstruction", unexpected_evaluation)
     first = jacobian.evaluate(old, evaluation)

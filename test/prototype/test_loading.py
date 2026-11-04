@@ -1,6 +1,7 @@
 """Accepted total histories, restart, rollback, and retained-face load schedules."""
 
 from copy import deepcopy
+from functools import partialmethod
 from typing import TypeAlias
 
 import numpy as np
@@ -12,6 +13,7 @@ from utils.load_schedule import AdaptiveLoadOptions, AdaptiveLoadStepError, Load
 from utils.newton_utils import JacobianMatrix, NewtonConvergenceError
 from alternatives.plane_strain import PlaneStrainTpsa
 from utils.state import TpsaState
+from material.J2 import ReturnMapData, vonMisesModel
 from material.material_state import MaterialPoint, MaterialState
 from prototype import loading
 from prototype.jacobian import RetainedAnalyticalJacobian, RetainedFiniteDifferenceJacobian
@@ -20,7 +22,7 @@ from prototype.newton import BacktrackingOptions, JacobianCallback
 from prototype.operators import RetainedFaceOperators
 from prototype.residual import RetainedFaceResidual
 from prototype.state import RetainedState, assemble_state_residual
-from material.tensor import strain
+from material.tensor import strain, stress
 
 FloatArray: TypeAlias = NDArray[np.float64]
 Setup: TypeAlias = tuple[PlaneStrainTpsa, RetainedFaceOperators, RetainedState, FloatArray]
@@ -216,20 +218,21 @@ def test_failed_attempt_is_atomic_and_retry_matches_clean_solve(failure: str, mo
     fail = True
     with monkeypatch.context() as patch:
         if failure == "material":
-            original = MaterialPoint.update
+            original = MaterialPoint.evaluate_from_with_data
             calls = 0
 
             def failing_update(
-                self: MaterialPoint, increment: strain, tol: float = 1e-10,
+                self: MaterialPoint, committed: MaterialState,
+                strain_increment: strain, tol: float = 1e-10,
                 *, rtol: float = 1e-12,
-            ) -> tuple[MaterialState, None]:
+            ) -> tuple[MaterialState, stress, ReturnMapData]:
                 nonlocal calls
                 calls += 1
                 if calls == 3:
                     raise RuntimeError("Injected local failure after two cells")
-                return original(self, increment, tol=tol, rtol=rtol)
+                return original(self, committed, strain_increment, tol=tol, rtol=rtol)
 
-            patch.setattr(MaterialPoint, "update", failing_update)
+            patch.setattr(MaterialPoint, "evaluate_from_with_data", failing_update)
         elif failure == "acceptance":
             def invalid_state(*args: object, **kwargs: object) -> RetainedState:
                 raise ValueError("Injected accumulated-state validation failure")
@@ -252,6 +255,22 @@ def test_failed_attempt_is_atomic_and_retry_matches_clean_solve(failure: str, mo
     fail = False
     clean = LoadStepController(ops, case.material_points, accepted.state, boundary, initial_load_factor=.25)
     assert_state_equal(controller.advance(.5).state, clean.advance(.5).state)
+
+
+def test_adaptive_cuts_back_on_local_return_map_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    case, ops, old, _ = make_setup()
+    # Saturating hardening needs several local iterations for a large increment.
+    case.hardening_parameters.sigma_u, case.hardening_parameters.delta = 400e6, 500.0
+    boundary = np.array([[1., .15], [-.05, -.075]]) * .01 @ case.grid.face_centers[:2]
+    monkeypatch.setattr(vonMisesModel, "consistency_parameter",
+                        partialmethod(vonMisesModel.consistency_parameter, max_iteration=3))
+    controller = LoadStepController(ops, case.material_points, old, boundary)
+    controller.run_adaptive([1.], options=AdaptiveLoadOptions(
+        initial_increment=1., max_increment=1., min_increment=1e-3))
+    rejected = [a for a in controller.attempts if not a.accepted]
+    assert controller.load_factor == 1.
+    assert rejected and rejected[0].load_factor == 1.
+    assert all(a.error is not None and "Return map failed in cell" in a.error for a in rejected)
 
 
 def test_adaptive_retries_from_same_total_history_and_reaches_reversed_targets() -> None:

@@ -291,7 +291,7 @@ def test_local_failure_cannot_partially_commit_global_state(
     def fail(**kwargs: object) -> None:
         raise RuntimeError("Injected return-map failure")
 
-    monkeypatch.setattr(case.material_points[1].model, "radial_return_map", fail)
+    monkeypatch.setattr(case.material_points[1].model, "radial_return_map_with_data", fail)
     with pytest.raises(RuntimeError, match="Injected return-map failure"):
         evaluate_global_residual(operators, transfer, case.material_points, committed, x, boundary)
     assert_state_equal(committed, saved)

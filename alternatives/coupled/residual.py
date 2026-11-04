@@ -40,10 +40,15 @@ class CoupledOperators(TpsaOperators):
     normals. cell_faces supplies the outward signs. Unit normals enter H_f;
     area-weighted normals enter integrated fluxes exactly once. No tangent
     moduli enter the weights. Rebuild after any geometry/material/type change.
+
+    Cartesian boundary components may independently prescribe displacement or
+    outward integrated traction. On Neumann components, H_f supplies the plastic
+    displacement correction and H_t is zero so the prescribed traction is exact.
+    The original full-Dirichlet maps are recovered when no Neumann data are used.
     """
 
     def __init__(self, case: PlaneStrainTpsa) -> None:
-        super().__init__(case)
+        super().__init__(case, allow_mixed_boundary=True)
         g, nc, nf = self.grid, self.num_cells, self.num_faces
         if not isinstance(g, TensorGrid):
             raise ValueError("Coupled reconstruction requires a Cartesian tensor-product grid.")
@@ -66,10 +71,13 @@ class CoupledOperators(TpsaOperators):
             raise ValueError("Coupled reconstruction requires Cartesian faces in the xy plane.")
 
         U = sps.lil_array((2 * nf, 4 * nc))
+        Ug = sps.lil_array((2 * nf, 2 * nf))
         Hf = sps.lil_array((2 * nf, 3 * nc))
         W = sps.lil_array((nf, nc))
         G = sps.lil_array((3 * nc, 2 * nf))
         self.delta_mu = np.zeros(nf)
+        self.boundary_signs = np.zeros(nf)
+        self.num_dofs = 7 * nc
         for face in range(nf):
             start, end = cf.indptr[face:face + 2]
             cells, signs = cf.indices[start:end], cf.data[start:end]
@@ -89,16 +97,28 @@ class CoupledOperators(TpsaOperators):
                     Hf[2 * face:2 * face + 2, 3 * cell:3 * cell + 3] = self.delta_mu[face] * sign * N
                     W[face, cell] = 1 - weight
             else:
-                W[face, cells[0]] = 1.0
+                cell, sign, stiffness = int(cells[0]), signs[0], a[0]
+                W[face, cell] = 1.0
+                self.boundary_signs[face] = sign
+                # Eliminate only the traction-prescribed displacement components.
+                # g_N is an OUTWARD integrated force, whereas n has grid orientation.
+                free = np.diag(self.neumann_mask[:, face].astype(float))
+                U[2 * face:2 * face + 2, 2 * cell:2 * cell + 2] = free
+                U[2 * face:2 * face + 2, 2 * nc + cell] = (
+                    sign / stiffness * free @ np.array([n[1], -n[0]]))[:, None]
+                U[2 * face:2 * face + 2, 3 * nc + cell] = (
+                    -sign / stiffness * free @ n)[:, None]
+                Hf[2 * face:2 * face + 2, 3 * cell:3 * cell + 3] = sign / stiffness * free @ N
+                Ug[2 * face:2 * face + 2, 2 * face:2 * face + 2] = (
+                    np.diag(self.dirichlet_mask[:, face].astype(float))
+                    + free / (stiffness * g.face_areas[face]))
             for cell, sign in zip(cells, signs, strict=True):
                 nx, ny = sign * g.face_normals[:2, face] / g.cell_volumes[cell]
                 G[3 * cell:3 * cell + 3, 2 * face:2 * face + 2] = np.array([
                     [nx, 0], [0, ny], [ny / SQRT2, nx / SQRT2],
                 ])
         self.U, self.H_f, self.G = U.tocsr(), Hf.tocsr(), G.tocsr()
-        boundary_mask = np.zeros(nf)
-        boundary_mask[self.boundary_faces] = 1
-        self.U_g = sps.diags(np.repeat(boundary_mask, 2), format="csr")
+        self.U_g = Ug.tocsr()
         self.transfer = CellToFaceTransfer(g, W.tocsr())
         self.B = sps.csr_array(self.G @ self.U)
         self.H_epsilon = sps.csr_array(self.G @ self.H_f)
@@ -109,7 +129,8 @@ class CoupledOperators(TpsaOperators):
         self.rotation_flux = sps.csr_array((np.vstack((ny, -nx)).ravel("F"), (rows, cols)), shape=(nf, 2 * nf))
         self.mass_flux = sps.csr_array((np.vstack((nx, ny)).ravel("F"), (rows, cols)), shape=(nf, 2 * nf))
         normals = [np.array([[x, 0, y / SQRT2], [0, y, x / SQRT2]]) for x, y in zip(nx, ny, strict=True)]
-        self.H_t = sps.csr_array(-sps.block_diag(normals, format="csr") @ sps.kron(self.transfer.weights, sps.eye(3)))
+        reaction_mask = sps.diags((~self.neumann_mask).ravel("F").astype(float), format="csr")
+        self.H_t = sps.csr_array(-reaction_mask @ sps.block_diag(normals, format="csr") @ sps.kron(self.transfer.weights, sps.eye(3)))
         self.D = sps.csr_array(g.cell_faces.T)
         self.H = sps.csr_array(sps.vstack((self.D_u @ self.H_t,
             self.D @ self.rotation_flux @ self.H_f, self.D @ self.mass_flux @ self.H_f)))
@@ -135,8 +156,11 @@ class CoupledOperators(TpsaOperators):
             raise ValueError("Coupled states require committed face_displacement; use TpsaState.zeros(grid, store_faces=True).")
         if state.face_displacement.shape != (2, self.num_faces) or not np.all(np.isfinite(state.face_displacement)):
             raise ValueError("Invalid committed face_displacement.")
-        if not np.allclose(state.face_displacement[:, self.boundary_faces], state.bc_values[:, self.boundary_faces], rtol=1e-10, atol=1e-12):
+        if not np.allclose(state.face_displacement[self.dirichlet_mask], state.bc_values[self.dirichlet_mask], rtol=1e-10, atol=1e-12):
             raise ValueError("Committed face displacement must match its Dirichlet data.")
+        prescribed_traction = state.bc_values * self.boundary_signs
+        if not np.allclose(state.traction[self.neumann_mask], prescribed_traction[self.neumann_mask], rtol=1e-10, atol=1e-10):
+            raise ValueError("Committed traction must match its Neumann data.")
         if not np.allclose(self.G @ state.face_displacement.ravel("F"), mandel(state.epsilon), rtol=1e-8, atol=1e-10):
             raise ValueError("Committed strain must match the stored face displacement reconstruction.")
         if len(points) != self.num_cells or len(state.material_states) != self.num_cells:
@@ -182,8 +206,10 @@ def evaluate_coupled_residual(
     """Evaluate all four equations from independent strain and fixed history.
 
     Face displacement and traction are updated incrementally from stored values.
-    MaterialPoint committed/trial slots are never modified. Boundary data are
-    prescribed exactly; face reactions remain functions of the candidate state.
+    MaterialPoint committed/trial slots are never modified. bc_values mixes
+    displacement on Dirichlet components with outward integrated forces on
+    Neumann components, following PorePy's convention. Only prescribed displacement
+    components are overwritten; the remaining face components are reconstructed.
     """
     nc, nf = operators.num_cells, operators.num_faces
     if z.shape != (7 * nc,) or not np.all(np.isfinite(z)):
@@ -201,7 +227,7 @@ def evaluate_coupled_residual(
     q = mandel(material.stress_correction)
     dx, dg = x - committed.x, (boundary - committed.bc_values).ravel("F")
     face = (committed.face_displacement.ravel("F") + operators.U @ dx + operators.U_g @ dg + operators.H_f @ q).reshape((2, nf), order="F")
-    face[:, bf] = boundary[:, bf]
+    face[operators.dirichlet_mask] = boundary[operators.dirichlet_mask]
     traction = (committed.traction.ravel("F") + operators.T @ dx + operators.T_g @ dg + operators.H_t @ q).reshape((2, nf), order="F")
     trial = TpsaState(x, boundary, epsilon, material.material_states, traction, face_displacement=face)
     return TpsaResidual(assemble_coupled_residual(operators, trial, sources=sources), trial, material.stress_correction)

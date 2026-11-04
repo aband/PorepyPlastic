@@ -92,7 +92,7 @@ class PlaneStrainProblem:
     def set_geometry(self) -> None:
         """Create the square grid and one initially undeformed point per cell."""
         self.x = None
-        self.grid = CartGrid(
+        self.grid: Grid = CartGrid(
             np.array([self.cells_per_axis, self.cells_per_axis]),
             physdims=np.array([1.0, 1.0]),
         )

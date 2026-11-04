@@ -13,6 +13,7 @@ bc_values (dim, num_faces); elastic coefficients come from each material point.
 
 Run the standalone 3D example with python -B -m prototype.example_3d.
 Run the paper cantilever with python -B -m prototype.cantilever_example --study.
+Run elastic bending/stress verification with python -B -m prototype.elastic_bending_example.
 Run Cook's membrane with python -B -m prototype.cooks_membrane_example.
 Run local tests with python -B -m pytest prototype/tests.
 """

@@ -10,12 +10,9 @@ from core.layout import FloatArray, DofLayout
 from core.operators import RetainedFaceOperators
 from core.tpsa_wrapper import ElasticTpsa
 
-from core.state import MaterialHistory
+from core.material import CellMaterial
+from core.state import MaterialHistory, MaterialTrial
 from material.material_state import MaterialPoint
-from utils.material_evaluation import (
-    MaterialTrial,
-    evaluate_material_at_strain,
-)
 
 @dataclass(frozen=True, eq=False)
 class LoadIncrement:
@@ -61,15 +58,9 @@ class ResidualAssembler:
         if grid.num_cells < 1 or len(self.material_points) != grid.num_cells:
             raise ValueError("Expected one material point per cell.")
 
-        mu = np.array([
-            point.material.isotropic_shear_modulus
-            for point in self.material_points
-        ],dtype=np.float64)
-
-        lam = np.array([
-            point.material.lame_parameter
-            for point in self.material_points
-        ],dtype=np.float64)
+        # Moduli and hardening data are read once for the batched updates.
+        self.material = CellMaterial(self.material_points)
+        mu, lam = self.material.mu, self.material.lam
 
         self.layout = DofLayout.from_grid(grid, bc)
 
@@ -185,17 +176,8 @@ class ResidualAssembler:
             face_increment
         )
 
-        with np.errstate(over="ignore", invalid="ignore"):
-            epsilon = committed.epsilon + strain_increment
-
-        return evaluate_material_at_strain(
-            layout=layout,
-            material_points=self.material_points,
-            committed=committed,
-            epsilon=epsilon,
-            dim=layout.dim,
-            tol=tol,
-            rtol=rtol,
+        return self.material.evaluate(
+            committed, strain_increment, tol=tol, rtol=rtol,
         )
 
     def _cell_flux_balance(

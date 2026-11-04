@@ -288,7 +288,7 @@ def test_local_failure_propagates_without_partial_history_updates(setup: Setup, 
     def fail(**kwargs: object) -> None:
         raise RuntimeError("Injected second-cell local failure")
 
-    monkeypatch.setattr(case.material_points[1].model, "radial_return_map", fail)
+    monkeypatch.setattr(case.material_points[1].model, "radial_return_map_with_data", fail)
     with pytest.raises(RuntimeError, match="second-cell local failure"):
         evaluate_global_residual(ops, case.material_points, old, z, boundary)
     assert_state_unchanged(old, snapshot)

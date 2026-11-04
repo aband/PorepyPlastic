@@ -154,7 +154,7 @@ def test_failed_update_cannot_commit_a_stale_trial(monkeypatch):
     def fail(**kwargs):
         raise RuntimeError("Local update failed")
 
-    monkeypatch.setattr(point.model, "radial_return_map", fail)
+    monkeypatch.setattr(point.model, "radial_return_map_with_data", fail)
     with pytest.raises(RuntimeError, match="Local update failed"):
         point.update(increment)
     assert point.trial is None

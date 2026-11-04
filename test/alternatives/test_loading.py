@@ -18,8 +18,9 @@ from alternatives.plane_strain import PlaneStrainTpsa
 from alternatives.original.residual import TpsaOperators, TpsaResidual
 from utils.state import TpsaState
 from utils.transfer import CellToFaceTransfer
+from material.J2 import ReturnMapData
 from material.material_state import MaterialPoint, MaterialState
-from material.tensor import strain
+from material.tensor import strain, stress
 
 Setup: TypeAlias = tuple[PlaneStrainTpsa, TpsaOperators, CellToFaceTransfer, TpsaState]
 
@@ -200,16 +201,19 @@ def test_failed_step_preserves_accepted_history_and_allows_retry(
     with monkeypatch.context() as patch:
         if failure == "material":
             def broken_update(
-                self: MaterialPoint, increment: strain, tol: float = 1e-10,
+                self: MaterialPoint, committed: MaterialState,
+                strain_increment: strain, tol: float = 1e-10,
                 *, rtol: float = 1e-12,
-            ) -> tuple[MaterialState, None]:
+            ) -> tuple[MaterialState, stress, ReturnMapData]:
                 raise RuntimeError("Injected material failure")
-            patch.setattr(MaterialPoint, "update", broken_update)
+            patch.setattr(MaterialPoint, "evaluate_from_with_data", broken_update)
         with pytest.raises(LoadStepError) as caught:
             controller.run([0.5, 0.75])
     error = caught.value
     assert error.step_index == 2 and error.load_factor == 0.5
     assert isinstance(error.__cause__, NewtonConvergenceError if failure == "iterations" else RuntimeError)
+    if failure == "material":
+        assert str(error.__cause__) == "Injected material failure"
     assert len(controller.steps) == 1 and controller.load_factor == 0.25
     assert_state_equal(controller.state, accepted.state)
     assert_state_equal(controller.steps[0].state, accepted.state)

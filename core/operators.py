@@ -413,4 +413,3 @@ class RetainedFaceOperators:
             raise ValueError("Elastic traction increments must be finite.")
 
         return np.asarray(traction, dtype=np.float64)
-

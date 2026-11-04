@@ -17,9 +17,25 @@ from typing import Self
 from numbers import Real
 
 import numpy as np
-from numpy.typing import ArrayLike
+from functools import lru_cache
+from numpy.typing import ArrayLike, NDArray
 
 import itertools
+
+def close_to_transpose(
+    values: NDArray[np.float64],
+    *,
+    rtol: float,
+    atol: float,
+) -> bool:
+    """np.allclose(values, values.T) for a finite square matrix.
+
+    Avoids np.allclose's per-call overhead in cellwise material loops.
+    """
+    transpose = values.T
+    return bool(
+        np.all(np.abs(values - transpose) <= atol + rtol * np.abs(transpose))
+    )
 
 class Tensor(ABC):
     """Class of the common parts of the arbitrary rank of Tensor."""
@@ -54,6 +70,10 @@ class Tensor(ABC):
         if not self.is_identity_dimension:
             raise ValueError("Tensor does not have identical dimensions.")
 
+        # Fast path for the per-cell hot loop; same tolerances as below.
+        if self._data.ndim == 2 and np.all(np.isfinite(self._data)):
+            return close_to_transpose(self._data, rtol=1e-5, atol=10e-14)
+
         for perm in itertools.permutations(range(self._data.ndim)):
             if not np.allclose(self._data, np.transpose(self._data, perm), atol=10e-14):
                 return False
@@ -66,6 +86,12 @@ class Tensor(ABC):
     @classmethod
     def identity(cls, dimension: int) -> Self:
         return cls(np.eye(dimension,dtype=np.float64),copy=False)
+
+    def copy(self) -> Self:
+        """Return an independent tensor of the same type without revalidation."""
+        duplicate = object.__new__(type(self))
+        duplicate._data = self._data.copy()
+        return duplicate
 
     @property
     def shape(self)->tuple[int,...]:
@@ -363,3 +389,32 @@ class stress(symmetricSecondOrderTensor):
 
     def hydrostatic(self) -> Self:
         return self.spherical()
+
+@lru_cache(maxsize=2, typed=True)
+def deviatoric_projector(
+    dimension: int = 3,
+    ) -> NDArray[np.float64]:
+    """Return a cached, read-only project."""
+    if (
+        isinstance(dimension, bool)
+        or not isinstance(dimension, (int, np.integer))
+        or dimension not in (2, 3)
+    ):
+        raise ValueError("Expected dimension 2 or 3.")
+
+    projector = np.empty((dimension,)*4, dtype=np.float64)
+
+    for k in range(dimension):
+        for l in range(dimension):
+            basis = np.zeros((dimension,dimension), dtype=np.float64)
+            basis[k,l] += 0.5
+            basis[l,k] += 0.5
+
+            projector[:,:,k,l] = (
+                symmetricSecondOrderTensor(basis, copy=False)
+                .deviatoric().to_numpy(copy=False)
+            )
+
+    projector.setflags(write=False)
+    return projector.view()
+

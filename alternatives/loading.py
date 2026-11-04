@@ -52,10 +52,13 @@ class LoadStepResult:
 
 
 class LoadStepController(_LoadStepSchedule[LoadStepResult]):
-    """Advance a full-Dirichlet TPSA model through prescribed proportional loads.
+    """Advance a TPSA model through prescribed proportional loads.
 
     Targets are g = factor * reference_bc_values and b = factor * reference_sources;
     sources are absolute cell-integrated values, not increments or densities.
+    CoupledOperators also accepts component-wise Dirichlet/Neumann boundaries:
+    reference_bc_values then contains displacement or outward integrated force
+    according to the boundary mask. The original formulation stays full Dirichlet.
     Factors may increase, decrease, repeat, or be negative. advance/run use fixed
     steps; iter_adaptive/run_adaptive insert substeps with cutback and growth.
     Every mode uses the same fully coupled Newton solve and atomic acceptance.

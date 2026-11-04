@@ -9,7 +9,7 @@ import pytest
 
 from core.layout import DofLayout, FloatArray
 from core.state import MaterialHistory
-from material.J2 import _materialProperty, vonMisesModel
+from material.J2 import ReturnMapData, _materialProperty, vonMisesModel
 from material.material_state import MaterialPoint, MaterialState
 from material.scalar_hardening import (
     HardeningParameters, isotropic_hardening_K, kinematic_hardening_H,
@@ -147,7 +147,7 @@ def test_total_strain_is_differenced_against_committed_history(
     layout: DofLayout, points: list[MaterialPoint], factor: float,
 ) -> None:
     previous = _epsilon(layout)
-    old = MaterialHistory(layout.dim, previous, [
+    old = MaterialHistory.from_states(layout.dim, previous, [
         _reference(point, MaterialState(), previous[:, :, cell])
         for cell, point in enumerate(points)
     ])
@@ -251,19 +251,20 @@ def test_later_cell_failure_does_not_accept_partial_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     saved = committed.copy()
-    original_update = MaterialPoint.update
+    evaluate = MaterialPoint.evaluate_from_with_data
     calls = 0
 
     def fail_second(
-        self: MaterialPoint, increment: strain, tol: float = 1e-10, *, rtol: float = 1e-12,
-    ) -> tuple[MaterialState, None]:
+        self: MaterialPoint, old: MaterialState, increment: strain,
+        tol: float = 1e-10, *, rtol: float = 1e-12,
+    ) -> tuple[MaterialState, stress, ReturnMapData]:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise RuntimeError("Second cell failed")
-        return original_update(self, increment, tol=tol, rtol=rtol)
+        return evaluate(self, old, increment, tol=tol, rtol=rtol)
 
-    monkeypatch.setattr(MaterialPoint, "update", fail_second)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", fail_second)
     with pytest.raises(RuntimeError, match="Second cell failed"):
         evaluate_material_at_strain(layout, points, committed, _epsilon(layout), dim=layout.dim)
     assert calls == 2
@@ -288,7 +289,7 @@ def test_legacy_state_and_default_dimension_remain_supported() -> None:
                             vonMisesModel("J2"), isotropic_hardening_K, kinematic_hardening_H)]
     epsilon = np.diag([0.004, -0.001, 0.0])[:, :, None]
     implicit = evaluate_material_at_strain(_CellCount(1), points, old, epsilon)
-    new = MaterialHistory(2, old.epsilon, old.material_states)
+    new = MaterialHistory.from_states(2, old.epsilon, old.material_states)
     explicit = evaluate_material_at_strain(_CellCount(1), points, new, epsilon, dim=2)
     np.testing.assert_array_equal(implicit.epsilon, explicit.epsilon)
     np.testing.assert_array_equal(implicit.stress_correction, explicit.stress_correction)
@@ -334,23 +335,33 @@ def test_history_dimension_must_match_explicit_dimension(
         evaluate_material_at_strain(layout, points, committed, _epsilon(layout), dim=5 - layout.dim)
 
 
+@dataclass
+class _ListHistory:
+    """Per-cell history with a mutable state list, as the shared evaluator accepts."""
+
+    dim: int
+    epsilon: FloatArray
+    material_states: list[MaterialState]
+
+
 @pytest.mark.parametrize("invalid", ["no_cells", "points_short", "points_long", "histories_short", "histories_long"])
 def test_cell_counts_must_match(
     layout: DofLayout, points: list[MaterialPoint], committed: MaterialHistory, invalid: str,
 ) -> None:
+    history = _ListHistory(committed.dim, committed.epsilon, committed.material_states)
     if invalid == "no_cells":
         layout = replace(layout, num_cells=0)
-        points, committed.material_states = [], []
+        points, history.material_states = [], []
     elif invalid == "points_short":
         points.pop()
     elif invalid == "points_long":
         points.append(points[-1])
     elif invalid == "histories_short":
-        committed.material_states.pop()
+        history.material_states.pop()
     else:
-        committed.material_states.append(MaterialState())
+        history.material_states.append(MaterialState())
     with pytest.raises(ValueError, match="one material point and history per cell"):
-        evaluate_material_at_strain(layout, points, committed, committed.epsilon, dim=layout.dim)
+        evaluate_material_at_strain(layout, points, history, history.epsilon, dim=layout.dim)
 
 
 @pytest.mark.parametrize("dtype", ["float32", "int64", "uint64"])
@@ -372,19 +383,20 @@ def test_local_tolerances_are_forwarded_without_computing_tangents(
     layout: DofLayout, points: list[MaterialPoint], committed: MaterialHistory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_update = MaterialPoint.update
+    evaluate = MaterialPoint.evaluate_from_with_data
     calls: list[tuple[float, float]] = []
 
     def record(
-        self: MaterialPoint, increment: strain, tol: float = 1e-10, *, rtol: float = 1e-12,
-    ) -> tuple[MaterialState, None]:
+        self: MaterialPoint, old: MaterialState, increment: strain,
+        tol: float = 1e-10, *, rtol: float = 1e-12,
+    ) -> tuple[MaterialState, stress, ReturnMapData]:
         calls.append((tol, rtol))
-        return original_update(self, increment, tol=tol, rtol=rtol)
+        return evaluate(self, old, increment, tol=tol, rtol=rtol)
 
     def unexpected_tangent(*args: object, **kwargs: object) -> None:
         pytest.fail("Residual material trials must not compute tangents.")
 
-    monkeypatch.setattr(MaterialPoint, "update", record)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", record)
     monkeypatch.setattr(vonMisesModel, "consistent_tangent", unexpected_tangent)
     evaluate_material_at_strain(layout, points, committed, _epsilon(layout), dim=layout.dim, tol=1e-8, rtol=1e-9)
     assert calls == [(1e-8, 1e-9)] * layout.num_cells
@@ -411,7 +423,7 @@ def test_overflow_in_increment_is_rejected_before_return_map(
     def unexpected_update(*args: object, **kwargs: object) -> None:
         pytest.fail("Invalid strain increments must be rejected before return mapping.")
 
-    monkeypatch.setattr(MaterialPoint, "update", unexpected_update)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", unexpected_update)
     with np.errstate(over="raise"), pytest.raises(ValueError, match="increments must remain finite"):
         evaluate_material_at_strain(layout, points, committed, epsilon, dim=layout.dim)
 
@@ -420,10 +432,17 @@ def test_nonfinite_correction_is_rejected(
     layout: DofLayout, points: list[MaterialPoint], committed: MaterialHistory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def bad_return(*args: object, **kwargs: object) -> tuple[MaterialState, None]:
-        return MaterialState(stress=stress(np.full((3, 3), np.nan))), None
+    evaluate = MaterialPoint.evaluate_from_with_data
 
-    monkeypatch.setattr(MaterialPoint, "update", bad_return)
+    def bad_return(
+        self: MaterialPoint, old: MaterialState, increment: strain,
+        tol: float = 1e-10, *, rtol: float = 1e-12,
+    ) -> tuple[MaterialState, stress, ReturnMapData]:
+        history, predictor, data = evaluate(self, old, increment, tol=tol, rtol=rtol)
+        history.stress = stress(np.full((3, 3), np.nan))
+        return history, predictor, data
+
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", bad_return)
     with pytest.raises(ValueError, match="Stress corrections must remain finite"):
         evaluate_material_at_strain(layout, points, committed, _epsilon(layout), dim=layout.dim)
     assert all(point.trial is None for point in points)

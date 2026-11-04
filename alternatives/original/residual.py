@@ -41,9 +41,12 @@ class TpsaOperators:
     This stage supports finite positive elastic coefficients, with uncoupled
     rotation/pressure equations. It does not impose boundary values on cell DOFs
     or evaluate material trials. All cells retain both displacement unknowns.
+    allow_mixed_boundary is for CoupledOperators, which supplies the matching
+    boundary reconstruction and plastic correction maps. The original residual
+    and reconstruction require the default full-Dirichlet setup.
     """
 
-    def __init__(self, case: PlaneStrainTpsa) -> None:
+    def __init__(self, case: PlaneStrainTpsa, *, allow_mixed_boundary: bool = False) -> None:
         if not hasattr(case, "face_discretization"):
             raise RuntimeError("Call case.prepare_simulation() before creating operators.")
         self.grid = case.grid
@@ -52,9 +55,19 @@ class TpsaOperators:
             raise ValueError("Expected a nonempty 2D grid.")
         self.num_cells, self.num_faces = nc, nf
         self.boundary_faces = self.grid.get_all_boundary_faces().copy()
-        if case.bc.is_dir.shape != (2, nf) or not np.all(
-            case.bc.is_dir[:, self.boundary_faces],
-        ):
+        if case.bc.is_dir.shape != (2, nf):
+            raise ValueError("Boundary conditions must match the 2D grid.")
+        self.dirichlet_mask = np.zeros((2, nf), dtype=bool)
+        self.neumann_mask = np.zeros((2, nf), dtype=bool)
+        self.dirichlet_mask[:, self.boundary_faces] = case.bc.is_dir[:, self.boundary_faces]
+        self.neumann_mask[:, self.boundary_faces] = case.bc.is_neu[:, self.boundary_faces]
+        if allow_mixed_boundary:
+            if (np.any(case.bc.is_rob[:, self.boundary_faces])
+                    or not np.all((self.dirichlet_mask ^ self.neumann_mask)[:, self.boundary_faces])):
+                raise ValueError("Each boundary component must be Dirichlet or Neumann.")
+            if not np.allclose(case.bc.basis, np.eye(2)[:, :, None], rtol=0, atol=1e-14):
+                raise ValueError("Mixed boundaries require global Cartesian components.")
+        elif not np.all(self.dirichlet_mask[:, self.boundary_faces]):
             raise ValueError("Operators require Dirichlet data on every boundary face.")
 
         self.face_discretization = sps.csr_array(case.face_discretization, copy=True)

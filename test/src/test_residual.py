@@ -8,6 +8,7 @@ import porepy as pp
 import pytest
 import scipy.sparse as sps
 
+import core.material as core_material
 from core.layout import FloatArray
 from core.residual import LoadIncrement, ResidualAssembler
 from core.state import MaterialHistory
@@ -518,7 +519,7 @@ def test_material_trials_start_from_committed_history_and_do_not_commit(
 ) -> None:
     faces, epsilon = _affine_material_increment(assembler)
     initial = assembler._evaluate_material_trial(faces, MaterialHistory.zeros(assembler.layout))
-    committed = MaterialHistory(assembler.layout.dim, initial.epsilon, initial.material_states)
+    committed = MaterialHistory.from_states(assembler.layout.dim, initial.epsilon, initial.material_states)
     snapshot = committed.copy()
     # Material points supply configuration; their own state slots are not the
     # history used for this candidate and must remain untouched.
@@ -565,19 +566,17 @@ def test_material_trials_start_from_committed_history_and_do_not_commit(
 def test_material_trial_forwards_return_map_tolerances(
     assembler: ResidualAssembler, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    update = MaterialPoint.update
+    evaluate = core_material.radial_return_batch
     calls: list[tuple[float, float]] = []
 
-    def recording_update(
-        point: MaterialPoint, strain_increment: strain, tol: float = 1e-10, *, rtol: float = 1e-12,
-    ) -> tuple[MaterialState, None]:
+    def recording_evaluation(*args: object, tol: float, rtol: float, **kwargs: object) -> object:
         calls.append((tol, rtol))
-        return update(point, strain_increment, tol, rtol=rtol)
+        return evaluate(*args, tol=tol, rtol=rtol, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(MaterialPoint, "update", recording_update)
+    monkeypatch.setattr(core_material, "radial_return_batch", recording_evaluation)
     faces, _ = _affine_material_increment(assembler)
     assembler._evaluate_material_trial(faces, MaterialHistory.zeros(assembler.layout), tol=2e-11, rtol=3e-13)
-    assert calls == [(2e-11, 3e-13)] * assembler.layout.num_cells
+    assert calls == [(2e-11, 3e-13)]
 
 
 @pytest.mark.parametrize("invalid", ["dimension", "strain_shape", "state_count"])
@@ -592,8 +591,8 @@ def test_material_trial_rejects_incompatible_committed_history(
         committed.epsilon = committed.epsilon[:, :, :-1]
         message = "Committed strain.*shape"
     else:
-        committed.material_states.pop()
-        message = "one material point and history per cell"
+        committed.alpha = committed.alpha[:-1]
+        message = "Committed alpha.*shape"
     faces, _ = _affine_material_increment(assembler)
     with pytest.raises(ValueError, match=message):
         assembler._evaluate_material_trial(faces, committed)
@@ -610,7 +609,7 @@ def test_nonlinear_evaluation_matches_material_and_balance_references(
     layout, operators = assembler.layout, assembler.operators
     faces, epsilon = _affine_material_increment(assembler)
     previous = previous_factor * epsilon
-    committed = MaterialHistory(layout.dim, previous, [
+    committed = MaterialHistory.from_states(layout.dim, previous, [
         _reference_material_update(point, MaterialState(), previous[:, :, cell])
         for cell, point in enumerate(assembler.material_points)
     ])
@@ -671,7 +670,7 @@ def test_nonlinear_evaluation_is_repeatable_and_preserves_committed_history(
     assembler = _assembler(grid, boundary_type)
     layout = assembler.layout
     faces, epsilon = _affine_material_increment(assembler)
-    committed = MaterialHistory(layout.dim, epsilon, [
+    committed = MaterialHistory.from_states(layout.dim, epsilon, [
         _reference_material_update(point, MaterialState(), epsilon[:, :, cell])
         for cell, point in enumerate(assembler.material_points)
     ])
@@ -741,22 +740,22 @@ def test_nonlinear_evaluation_is_repeatable_and_preserves_committed_history(
 def test_nonlinear_evaluation_forwards_tolerances_and_updates_each_cell_once(
     assembler: ResidualAssembler, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    update = MaterialPoint.update
+    evaluate = core_material.radial_return_batch
     calls: list[tuple[int, float, float]] = []
 
-    def recording_update(
-        point: MaterialPoint, strain_increment: strain, tol: float = 1e-10, *, rtol: float = 1e-12,
-    ) -> tuple[MaterialState, None]:
-        calls.append((id(point.material), tol, rtol))
-        return update(point, strain_increment, tol, rtol=rtol)
+    def recording_evaluation(*args: object, tol: float, rtol: float, **kwargs: object) -> object:
+        alpha_n = cast(FloatArray, args[3])
+        calls.append((alpha_n.size, tol, rtol))
+        return evaluate(*args, tol=tol, rtol=rtol, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(MaterialPoint, "update", recording_update)
+    monkeypatch.setattr(core_material, "radial_return_batch", recording_evaluation)
     layout = assembler.layout
     faces, _ = _affine_material_increment(assembler)
     z = layout.pack(np.zeros(layout.cell_size), faces[:, layout.free_faces])
     loads = replace(_loads(assembler), dirichlet_increment=faces[:, layout.dirichlet_faces])
     assembler.evaluate(z, loads, MaterialHistory.zeros(layout), tol=2e-11, rtol=3e-13)
-    assert calls == [(id(point.material), 2e-11, 3e-13) for point in assembler.material_points]
+    # One batched update covering every cell exactly once.
+    assert calls == [(layout.num_cells, 2e-11, 3e-13)]
 
 
 @pytest.mark.parametrize("field", ["z", "dirichlet_increment", "neumann_increment", "cell_source_increment"])
@@ -766,7 +765,8 @@ def test_nonlinear_evaluation_validates_inputs_before_material_updates(
     def unexpected_update(*args: object, **kwargs: object) -> None:
         pytest.fail("Invalid global inputs must be rejected before any local material update.")
 
-    monkeypatch.setattr(MaterialPoint, "update", unexpected_update)
+    monkeypatch.setattr(MaterialPoint, "evaluate_from_with_data", unexpected_update)
+    monkeypatch.setattr(core_material, "radial_return_batch", unexpected_update)
     z = np.zeros(assembler.layout.size)
     loads = _loads(assembler)
     if field == "z":

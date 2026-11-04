@@ -1,4 +1,5 @@
 /results/
+/docs/
 /docs/*.aux
 /docs/*.log
 /docs/*.out

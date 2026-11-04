@@ -5,10 +5,10 @@ from core.residual import ResidualAssembler, ResidualEvaluation
 
 from utils.reconstruction import mandel_basis
 
-from core.layout import FloatArray
-from core.state import MaterialHistory
-from material.tangent import analytical_material_tangent
-from utils.material_evaluation import MaterialTrial
+from core.state import MaterialHistory, MaterialTrial
+from material.tensor import deviatoric_projector
+
+from core.condensation import CondensedElasticSystem
 
 class AnalyticalJacobian:
     """Analytical derivatives of the retained cell/face residual."""
@@ -26,18 +26,18 @@ class AnalyticalJacobian:
             m, nd * nd, order="C"
         )
 
-        # Elastic material parameters remain fixed during Newton iterations.
-        self._elastic_mandel = tuple(
-            np.einsum(
-                "aij,ijkl,bkl->ab",
-                self._mandel_basis,
-                point.material.elastic_tensor.to_numpy(copy=False)[
-                    :nd, :nd, :nd, :nd
-                ],
-                self._mandel_basis,
-                optimize=True,
-            )
-            for point in self.assembler.material_points
+        # Cache local block indices
+        indices = np.arange(m, dtype=np.int64)
+        self._block_rows = np.repeat(indices, m)
+        self._block_cols = np.tile(indices, m)
+
+        # In-plane Mandel form of the deviatoric projector, used by every
+        # plastic block of C_e - C_alg.
+        projector = deviatoric_projector(3)[:nd, :nd, :nd, :nd]
+        self._deviatoric_mandel = (
+            self._mandel_projection
+            @ projector.reshape(nd * nd, nd * nd, order="C")
+            @ self._mandel_projection.T
         )
 
         # Strain variations depend only on free-face displacement variations.
@@ -60,6 +60,21 @@ class AnalyticalJacobian:
         self.P = sps.csr_array(self.S @ self.P_side)
         self.P.eliminate_zeros()
 
+        face = self.layout.face_slice
+        cell_rows = self.P[: self.layout.cell_size]
+
+        # Cell rows of P vanish analytically (eq. 21: sum_s A_s n_s = 0 per cell).
+        # Allow cancellation round-off relative to the individual side terms in
+        # P_side; larger entries would mean a broken P_side or S. Comparing with
+        # max|P| fails when there are no free faces, since P is then round-off only.
+        # The condensed path uses P_face alone, so round-off there never matters.
+        scale = np.abs(self.P_side.data).max(initial=0.0)
+        if cell_rows.nnz and np.abs(cell_rows.data).max() > 1e-12 * scale:
+            raise ValueError("Stress-correction map must not reach cell rows.")
+        self.P_face = sps.csr_array(self.P[face])
+        self.B_face = sps.csr_array(self.operators.B_free)
+        self._condensed: CondensedElasticSystem | None = None
+
         self.H = self._build_auxiliary_matrix()
 
         self.L = sps.csr_array(self.S @ self.T + self.H)
@@ -67,6 +82,30 @@ class AnalyticalJacobian:
 
         if not np.all(np.isfinite(self.L.data)):
             raise ValueError("Elastic Jacobian must remain finite.")
+
+    def plastic_face_block(
+            self, 
+            committed:MaterialHistory, 
+            evaluation:ResidualEvaluation,
+        ) -> sps.csr_array | None:
+        """P_f @ D_Q @ B_f for the evaluated candidate; None if every cell is elastic."""
+        trial = evaluation.material_trial   # same validation as evaluate()
+        if trial is None:
+            raise ValueError(
+                "Jacobian evaluation requires a material trial "
+                "from ResidualAssembler.evaluate()."
+            )
+
+        D_Q = self._build_material_correction_tangent(committed, trial)
+        if D_Q.nnz == 0:
+            return None
+        return sps.csr_array(self.P_face @ (D_Q @ self.B_face))
+
+    def condensed_elastic(self) -> CondensedElasticSystem:
+        """Built on first use and cached: several solvers on one Jacobian share it."""
+        if self._condensed is None:
+            self._condensed = CondensedElasticSystem(self.L, self.layout)
+        return self._condensed
 
     def _build_elastic_traction_matrix(self) -> sps.csr_array:
         """Differentiate integrated elastic side tractions with respect to z."""
@@ -327,10 +366,15 @@ class AnalyticalJacobian:
         committed: MaterialHistory,
         trial: MaterialTrial,
     ) -> sps.csr_array:
-        """Return blockdiag(C_e^M - C_alg^M) for the current material trial.
+        """
+        Return blockdiag(C_e^M - C_alg^M) for the current material trial.
 
         committed is fixed throughout the load step.
         trial must come from the residual evaluation at the current candidate.
+
+        On plastic cells, C_e - C_alg = c_dev P_dev + c_nn (n outer n), so
+        each block is formed directly without the elastic tensor. Elastic
+        cells contribute nothing. No return map is repeated.
         """
         nd, nc = self.layout.dim, self.layout.num_cells
         shape = (3, 3, nc)
@@ -342,49 +386,51 @@ class AnalyticalJacobian:
             raise ValueError(f"Expected committed and trial strains with shape {shape}.")
 
         if (
-            len(committed.material_states) != nc
-            or len(trial.material_states) != nc
+            committed.alpha.shape != (nc,)
+            or trial.history.alpha.shape != (nc,)
+            or trial.return_map.dgamma.shape != (nc,)
         ):
             raise ValueError("Expected one committed and trial material state per cell.")
 
-        increments = trial.epsilon - committed.epsilon
-        #basis = self._mandel_basis
-        blocks: list[FloatArray] = []
-
         M = self._mandel_projection
-        M_transpose = M.T
+        m = M.shape[0]
+        size = m * nc
 
-        for cell, point in enumerate(self.assembler.material_points):
-            algorithmic = analytical_material_tangent(
-                point,
-                committed.material_states[cell],
-                increments[:, :, cell],
-                dim=nd,
-                returned=trial.material_states[cell],
-            )
+        cells, c_dev, c_nn = self.assembler.material.tangent_correction(trial)
 
-            # Input strain indices already have size nd; select active stress rows.
-            #algorithmic_mandel = np.einsum(
-            #    "aij,ijkl,bkl->ab",
-            #    basis,
-            #    algorithmic[:nd, :nd, :, :],
-            #    basis,
-            #    optimize=True,
-            #)
-            # Reuse the computed mandel basis
-            active_tangent = algorithmic[:nd, :nd, :, :]
+        # All cells followed the elastic branch.
+        if cells.size == 0:
+            return sps.csr_array((size, size), dtype=np.float64)
 
-            algorithmic_mandel = (
-                M
-                @ active_tangent.reshape(nd*nd, nd*nd, order="C")
-                @ M_transpose
-            )
+        # In-plane Mandel flow directions, shape (m, plastic cells).
+        direction = trial.return_map.flow_direction[:nd, :nd, cells]
+        n_mandel = M @ direction.reshape(nd * nd, cells.size, order="C")
 
-            blocks.append(
-                self._elastic_mandel[cell] - algorithmic_mandel
-            )
+        # Blocks ordered (cell, row, column) to match the index layout below.
+        blocks = (
+            c_dev[:, None, None] * self._deviatoric_mandel[None, :, :]
+            + c_nn[:, None, None]
+            * np.einsum("ak,bk->kab", n_mandel, n_mandel)
+        )
 
-        matrix = sps.csr_array(sps.block_diag(blocks, format="csr"))
+        # Preserve each plastic cell's original global position
+        offsets = m * cells
+
+        rows = (
+            offsets[:,None] + self._block_rows[None, :]
+        ).ravel(order="C")
+
+        cols = (
+            offsets[:,None] + self._block_cols[None, :]
+        ).ravel(order="C")
+
+        entries = blocks.ravel(order="C")
+
+        matrix = sps.coo_array(
+            (entries,(rows,cols)),
+            shape=(size,size),
+        ).tocsr()
+
         matrix.eliminate_zeros()
 
         if not np.all(np.isfinite(matrix.data)):
@@ -410,6 +456,9 @@ class AnalyticalJacobian:
             )
 
         D_Q = self._build_material_correction_tangent(committed, trial)
+
+        if D_Q.nnz == 0:
+            return self.L.copy()
 
         matrix = sps.csr_array(
             self.L + self.P @ (D_Q @ self.B_z)

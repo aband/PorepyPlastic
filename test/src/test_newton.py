@@ -294,7 +294,7 @@ def test_reused_jacobian_handles_plastic_reloading_and_elastic_unloading(assembl
             (delta_sigma[:layout.dim, :layout.dim] @ ops.side_normals) * ops.side_areas, atol=1e-10)
         _assert_history(old, saved)
         # Acceptance belongs to the caller, never to solve_newton.
-        old = MaterialHistory(layout.dim, trial.epsilon, trial.material_states)
+        old = MaterialHistory.from_states(layout.dim, trial.epsilon, trial.material_states)
         reference = returned.copy()
     assert all(point.trial is None and point.committed.alpha == 0 for point in assembler.material_points)
 

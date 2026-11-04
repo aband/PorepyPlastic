@@ -9,13 +9,51 @@ import numpy as np
 import scipy.sparse as sps  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+import warnings
+
+from dataclasses import dataclass
+
+try:
+    import scikits.umfpack as umfpack
+except ImportError: #if umfpack not installed correctly
+    umfpack = None
+
+
 JacobianMatrix: TypeAlias = sps.spmatrix | sps.sparray | NDArray[np.float64]
 BlockTolerances: TypeAlias = tuple[float, float, float] | tuple[float, float, float, float]
 
 
-class NewtonConvergenceError(RuntimeError):
+class StepFailure(RuntimeError):
+    """Recoverable failure: retrying with a smaller load increment may succeed."""
+
+class NewtonConvergenceError(StepFailure):
     """The last evaluated candidate did not meet all block residual tolerances."""
 
+class NewtonDivergenceError(StepFailure):
+    """Non-finite iterate or failed linear solve during Newton."""
+
+class LocalUpdateError(StepFailure):
+    """The constitutive return map failed in at least one cell."""
+
+@dataclass(frozen=True)
+class BacktrackingOptions:
+    """Armijo search: try 1, factor, factor**2, ... for each Newton correction.
+
+    max_backtracks counts reductions AFTER the full-step trial.
+    """
+
+    factor: float = 0.5
+    armijo: float = 1e-4
+    max_backtracks: int = 12
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.factor) or not 0 < self.factor < 1:
+            raise ValueError("Backtracking factor must lie strictly between zero and one.")
+        if not np.isfinite(self.armijo) or not 0 < self.armijo < 0.5:
+            raise ValueError("Armijo coefficient must lie strictly between zero and 0.5.")
+        if (isinstance(self.max_backtracks, bool)
+                or not isinstance(self.max_backtracks, (int, np.integer)) or self.max_backtracks < 0):
+            raise ValueError("max_backtracks must be a nonnegative integer.")
 
 def newton_convergence_rates(
     residual_norms: NDArray[np.float64],
@@ -118,16 +156,35 @@ def _validate_newton_options(
 def _solve_linear_correction(
     jacobian: JacobianMatrix, residual: NDArray[np.float64], iteration: int,
 ) -> NDArray[np.float64]:
-    """Solve the full Newton system, preserving the callback's matrix."""
+    """Solve the full Newton system (UMFPACK), preserving the callback's matrix."""
     size = residual.size
-    matrix = sps.csc_array(jacobian, dtype=np.float64, copy=True)
+    #matrix = sps.csc_array(jacobian, dtype=np.float64, copy=True)
+    matrix = sps.csc_matrix(jacobian, dtype=np.float64, copy=True)
     matrix.sum_duplicates()
     if matrix.shape != (size, size) or not np.all(np.isfinite(matrix.data)):
         raise ValueError(f"Jacobian must be finite with shape ({size}, {size}).")
+
     try:
-        correction = np.asarray(sps.linalg.splu(matrix).solve(-residual), dtype=np.float64)
-    except RuntimeError as error:
-        raise RuntimeError(f"Newton linear solve failed at correction {iteration + 1}.") from error
-    if correction.shape != residual.shape or not np.all(np.isfinite(correction)):
+        if umfpack is None:
+            factor = sps.linalg.splu(sps.csc_array(matrix))
+        else:
+            # UMFPACK reports a singular matrix as a warning, not an exception
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", umfpack.UmfpackWarning)
+                factor = umfpack.splu(matrix)
+        correction = np.asarray(factor.solve(-residual), dtype=np.float64)
+    except (RuntimeError, umfpack.UmfpackWarning if umfpack else RuntimeError) as error:
+        raise NewtonDivergenceError(
+            f"Newton linear solve failed at correction {iteration + 1}."
+        ) from error
+    
+    #try:
+    #    correction = np.asarray(sps.linalg.splu(matrix).solve(-residual), dtype=np.float64)
+    #except RuntimeError as error:
+    #    raise NewtonDivergenceError(f"Newton linear solve failed at correction {iteration + 1}.") from error
+
+    if correction.shape != residual.shape:
         raise RuntimeError(f"Newton produced a non-finite or invalid correction at iteration {iteration + 1}.")
+    if not np.all(np.isfinite(correction)):
+        raise NewtonDivergenceError(f"Newton produced a non-finite correction at iteration {iteration + 1}.")
     return correction

@@ -1,4 +1,4 @@
-"""VTK and PNG export of the cell fields in a two-dimensional TPSA solution."""
+"""VTK and PNG export of two-dimensional meshes and TPSA cell fields."""
 
 from __future__ import annotations
 
@@ -107,6 +107,60 @@ def _publish_pvd_collections(folder: Path, file_name: str) -> None:
                 dataset.set("file", (Path("..") / "vtu" / reference).as_posix())
         collection.write(destination / source.name, encoding="utf-8", xml_declaration=True)
         source.unlink()
+
+
+def export_mesh_png(
+    grid: Grid,
+    *,
+    folder_name: str | Path = "results",
+    file_name: str = "mesh",
+    title: str = "Mesh",
+    info: str | None = None,
+) -> Path:
+    """Save a prepared 2D mesh as a 300-dpi PNG using PorePy's plot_grid.
+
+    No solution is required. Geometry must already be computed, including any
+    simplex center preprocessing; geometry is never recomputed here. Coordinates
+    are displayed in metres with equal axis scales and light cell shading.
+
+    Pass native PorePy info flags for optional geometry markers and numbering:
+    C for cells, F for faces, N for nodes, O for face normals, or ALL. The default
+    shows only the mesh. Numbered views are best suited to coarse grids.
+
+    file_name is a prefix without directories or the .png extension. Create the
+    output directory as needed and return the PNG path. Only the figure created
+    here is closed, including when rendering or saving fails.
+    """
+    if grid.dim != 2 or grid.num_cells < 1:
+        raise ValueError("Mesh PNG export expects a nonempty two-dimensional grid.")
+    if not file_name or Path(file_name).name != file_name or file_name in (".", ".."):
+        raise ValueError("file_name must be a nonempty file prefix without directories.")
+
+    folder = Path(folder_name)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{file_name}.png"
+
+    with plt.rc_context({"font.size": 10}):
+        fig = plt.figure(figsize=(6.4, 5.6))
+        try:
+            pp.plot_grid(
+                grid,
+                info=info,
+                plot_2d=True,
+                if_plot=False,
+                fig_num=fig.number,
+                title=title,
+                rgb=[0.97, 0.97, 0.97],
+                linewidth=0.6,
+            )
+            axes = fig.axes[0]
+            axes.set_aspect("equal", adjustable="box")
+            axes.set_xlabel("x [m]")
+            axes.set_ylabel("y [m]")
+            fig.savefig(path, dpi=300, bbox_inches="tight", pad_inches=0.1)
+        finally:
+            plt.close(fig)
+    return path
 
 
 def export_vtk(
